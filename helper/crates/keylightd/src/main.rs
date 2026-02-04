@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::fs;
+use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tiny_http::{Method, Response, Server, StatusCode};
 
 const KELVIN_MIN: u16 = 2900;
 const KELVIN_MAX: u16 = 7000;
 const MIRED_MIN: u16 = (1_000_000u32 / KELVIN_MAX as u32) as u16;
 const MIRED_MAX: u16 = (1_000_000u32 / KELVIN_MIN as u32) as u16;
+
+const MAX_API_BODY_BYTES: usize = 64 * 1024; // 64KiB
 
 fn default_enabled() -> bool {
     true
@@ -167,6 +170,14 @@ struct LightRecord {
 struct Group {
     name: String,
     members: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct LightStateResponse {
+    id: String,
+    on: bool,
+    brightness: u8,
+    kelvin: u16,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -364,19 +375,150 @@ fn run_api_server(client: &Client, port: u16) -> Result<(), Box<dyn Error>> {
     })?;
     println!("keylightd API listening on http://127.0.0.1:{port}");
 
+    let mut rate_limiter = RateLimiter::new();
+
     for mut request in server.incoming_requests() {
         let method = request.method().clone();
         let url = request.url().to_string();
         let (path, _query) = url.split_once('?').unwrap_or((url.as_str(), ""));
 
-        let mut body = String::new();
-        let _ = std::io::Read::read_to_string(&mut request.as_reader(), &mut body);
+        if !rate_limiter.allow(&method, path) {
+            request
+                .respond(json_client_error(
+                    StatusCode(429),
+                    "Too many requests. Please slow down.",
+                ))
+                .ok();
+            continue;
+        }
+
+        let body = match read_body_limited(&mut request) {
+            Ok(body) => body,
+            Err(BodyReadError::TooLarge) => {
+                request
+                    .respond(json_client_error(
+                        StatusCode(413),
+                        "Request body too large.",
+                    ))
+                    .ok();
+                continue;
+            }
+            Err(BodyReadError::InvalidUtf8) => {
+                request
+                    .respond(json_client_error(
+                        StatusCode(400),
+                        "Request body must be valid UTF-8.",
+                    ))
+                    .ok();
+                continue;
+            }
+            Err(BodyReadError::Io(err)) => {
+                request
+                    .respond(json_server_error(
+                        StatusCode(500),
+                        "reading request body",
+                        err,
+                    ))
+                    .ok();
+                continue;
+            }
+        };
 
         let response = handle_api_request(client, &method, path, &body);
         request.respond(response).ok();
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum BodyReadError {
+    TooLarge,
+    InvalidUtf8,
+    Io(std::io::Error),
+}
+
+fn read_body_limited(request: &mut tiny_http::Request) -> Result<String, BodyReadError> {
+    use std::io::Read as _;
+
+    // Always cap reads to prevent a local DoS.
+    let reader = request.as_reader();
+    let mut limited = reader.take((MAX_API_BODY_BYTES + 1) as u64);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).map_err(BodyReadError::Io)?;
+    if bytes.len() > MAX_API_BODY_BYTES {
+        return Err(BodyReadError::TooLarge);
+    }
+    String::from_utf8(bytes).map_err(|_| BodyReadError::InvalidUtf8)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RateBucket {
+    Control,
+    Refresh,
+}
+
+struct BucketState {
+    window_start: Instant,
+    count: u32,
+}
+
+struct RateLimiter {
+    control: BucketState,
+    refresh: BucketState,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            // Slider updates can be chatty; keep this high enough to not affect UX.
+            control: BucketState {
+                window_start: now,
+                count: 0,
+            },
+            // Discovery/refresh is heavier; keep it tighter.
+            refresh: BucketState {
+                window_start: now,
+                count: 0,
+            },
+        }
+    }
+
+    fn allow(&mut self, method: &Method, path: &str) -> bool {
+        // Always allow health checks.
+        if *method == Method::Get && path == "/v1/health" {
+            return true;
+        }
+
+        let bucket = if *method == Method::Post && path == "/v1/lights/refresh" {
+            RateBucket::Refresh
+        } else {
+            RateBucket::Control
+        };
+
+        match bucket {
+            RateBucket::Control => {
+                Self::allow_in_bucket(&mut self.control, 400, Duration::from_secs(1))
+            }
+            RateBucket::Refresh => {
+                Self::allow_in_bucket(&mut self.refresh, 5, Duration::from_secs(10))
+            }
+        }
+    }
+
+    fn allow_in_bucket(state: &mut BucketState, max: u32, window: Duration) -> bool {
+        let now = Instant::now();
+        if now.duration_since(state.window_start) >= window {
+            state.window_start = now;
+            state.count = 0;
+        }
+        if state.count >= max {
+            return false;
+        }
+        state.count += 1;
+        true
+    }
 }
 
 fn handle_api_request(
@@ -391,16 +533,25 @@ fn handle_api_request(
         }
         (Method::Get, "/v1/lights") => match load_config() {
             Ok(config) => json_response(StatusCode(200), &config.lights),
-            Err(err) => json_error(StatusCode(500), err),
+            Err(err) => json_server_error(StatusCode(500), "loading config", err),
         },
         (Method::Post, "/v1/lights") => {
             let request: AddLightRequest = match serde_json::from_str(body) {
                 Ok(value) => value,
-                Err(_) => return json_error(StatusCode(400), "Invalid JSON body for add light"),
+                Err(_) => {
+                    return json_client_error(StatusCode(400), "Invalid JSON body for add light")
+                }
             };
-            match add_light_by_ip(client, request.ip) {
+            let ip = match validate_manual_ip(&request.ip) {
+                Ok(ip) => ip.to_string(),
+                Err(msg) => return json_client_error(StatusCode(400), msg),
+            };
+            match add_light_by_ip(client, ip) {
                 Ok(record) => json_response(StatusCode(200), &record),
-                Err(err) => json_error(StatusCode(400), err),
+                Err(err) => {
+                    // Do not leak internal network errors; log server-side.
+                    json_server_error(StatusCode(400), "adding light by ip", err)
+                }
             }
         }
         (Method::Post, "/v1/lights/refresh") => {
@@ -413,21 +564,25 @@ fn handle_api_request(
             };
             match discover_lights(client, Duration::from_secs(timeout)) {
                 Ok(_) => json_response(StatusCode(200), &serde_json::json!({"refreshed": true})),
-                Err(err) => json_error(StatusCode(500), err),
+                Err(err) => json_server_error(StatusCode(500), "refresh discovery", err),
             }
         }
+        (Method::Get, "/v1/lights/states") => match get_all_light_states(client) {
+            Ok(states) => json_response(StatusCode(200), &states),
+            Err(err) => json_server_error(StatusCode(500), "getting light states", err),
+        },
         (Method::Get, "/v1/groups") => match load_config() {
             Ok(config) => json_response(StatusCode(200), &config.groups),
-            Err(err) => json_error(StatusCode(500), err),
+            Err(err) => json_server_error(StatusCode(500), "loading config", err),
         },
         (Method::Post, "/v1/groups") => {
             let request: GroupRequest = match serde_json::from_str(body) {
                 Ok(value) => value,
-                Err(_) => return json_error(StatusCode(400), "Invalid JSON body for group"),
+                Err(_) => return json_client_error(StatusCode(400), "Invalid JSON body for group"),
             };
             match save_group(request.name, request.members) {
                 Ok(group) => json_response(StatusCode(200), &group),
-                Err(err) => json_error(StatusCode(400), err),
+                Err(err) => json_client_error(StatusCode(400), &err.to_string()),
             }
         }
         (Method::Delete, path) if path.starts_with("/v1/groups/") => {
@@ -437,7 +592,7 @@ fn handle_api_request(
                 .unwrap_or_else(|_| raw_name.to_string());
             match delete_group(group_name) {
                 Ok(_) => json_response(StatusCode(200), &serde_json::json!({"deleted": true})),
-                Err(err) => json_error(StatusCode(404), err),
+                Err(err) => json_client_error(StatusCode(404), &err.to_string()),
             }
         }
         (Method::Put, path) if path.starts_with("/v1/lights/") => {
@@ -449,12 +604,33 @@ fn handle_api_request(
                 let request: EnabledRequest = match serde_json::from_str(body) {
                     Ok(value) => value,
                     Err(_) => {
-                        return json_error(StatusCode(400), "Invalid JSON body for enabled request")
+                        return json_client_error(
+                            StatusCode(400),
+                            "Invalid JSON body for enabled request",
+                        )
                     }
                 };
                 match set_light_enabled(id, request.enabled) {
                     Ok(record) => return json_response(StatusCode(200), &record),
-                    Err(err) => return json_error(StatusCode(400), err),
+                    Err(err) => return json_client_error(StatusCode(400), &err.to_string()),
+                }
+            }
+            if let Some(raw_id) = raw_id.strip_suffix("/alias") {
+                let id = urlencoding::decode(raw_id)
+                    .map(|value| value.into_owned())
+                    .unwrap_or_else(|_| raw_id.to_string());
+                let request: AliasRequest = match serde_json::from_str(body) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return json_client_error(
+                            StatusCode(400),
+                            "Invalid JSON body for alias request",
+                        )
+                    }
+                };
+                match set_light_alias(id, request.alias) {
+                    Ok(record) => return json_response(StatusCode(200), &record),
+                    Err(err) => return json_client_error(StatusCode(400), &err.to_string()),
                 }
             }
             let id = urlencoding::decode(raw_id)
@@ -463,12 +639,15 @@ fn handle_api_request(
             let update: UpdateRequest = match serde_json::from_str(body) {
                 Ok(value) => value,
                 Err(_) => {
-                    return json_error(StatusCode(400), "Invalid JSON body for update request");
+                    return json_client_error(
+                        StatusCode(400),
+                        "Invalid JSON body for update request",
+                    );
                 }
             };
             match apply_update_to_targets(client, Some(id), None, false, update) {
                 Ok(results) => json_response(StatusCode(200), &results),
-                Err(err) => json_error(StatusCode(400), err),
+                Err(err) => json_client_error(StatusCode(400), &err.to_string()),
             }
         }
         (Method::Put, path) if path.starts_with("/v1/groups/") => {
@@ -479,27 +658,33 @@ fn handle_api_request(
             let update: UpdateRequest = match serde_json::from_str(body) {
                 Ok(value) => value,
                 Err(_) => {
-                    return json_error(StatusCode(400), "Invalid JSON body for update request")
+                    return json_client_error(
+                        StatusCode(400),
+                        "Invalid JSON body for update request",
+                    )
                 }
             };
             match apply_update_to_targets(client, None, Some(group_name), false, update) {
                 Ok(results) => json_response(StatusCode(200), &results),
-                Err(err) => json_error(StatusCode(400), err),
+                Err(err) => json_client_error(StatusCode(400), &err.to_string()),
             }
         }
         (Method::Put, "/v1/all") => {
             let update: UpdateRequest = match serde_json::from_str(body) {
                 Ok(value) => value,
                 Err(_) => {
-                    return json_error(StatusCode(400), "Invalid JSON body for update request")
+                    return json_client_error(
+                        StatusCode(400),
+                        "Invalid JSON body for update request",
+                    )
                 }
             };
             match apply_update_to_targets(client, None, None, true, update) {
                 Ok(results) => json_response(StatusCode(200), &results),
-                Err(err) => json_error(StatusCode(400), err),
+                Err(err) => json_client_error(StatusCode(400), &err.to_string()),
             }
         }
-        _ => json_error(StatusCode(404), "Not found"),
+        _ => json_client_error(StatusCode(404), "Not found"),
     }
 }
 
@@ -532,6 +717,11 @@ struct EnabledRequest {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct AliasRequest {
+    alias: Option<String>,
+}
+
 fn json_response<T: Serialize>(
     status: StatusCode,
     value: &T,
@@ -542,13 +732,22 @@ fn json_response<T: Serialize>(
         .with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
         )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"X-Content-Type-Options"[..], &b"nosniff"[..]).unwrap(),
+        )
 }
 
-fn json_error<E: std::fmt::Display>(
+fn json_client_error(status: StatusCode, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    json_response(status, &serde_json::json!({ "error": message }))
+}
+
+fn json_server_error<E: std::fmt::Display>(
     status: StatusCode,
+    context: &str,
     err: E,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
-    json_response(status, &serde_json::json!({ "error": err.to_string() }))
+    eprintln!("[keylightd] {context}: {err}");
+    json_client_error(status, "Internal server error.")
 }
 
 fn print_lights(payload: &LightsPayload<LightState>) {
@@ -578,7 +777,12 @@ fn clamp_mired(mired: u16) -> u16 {
 
 fn resolve_ip(ip: Option<String>, id: Option<String>) -> Result<String, Box<dyn Error>> {
     match (ip, id) {
-        (Some(ip), None) => Ok(ip),
+        (Some(ip), None) => {
+            // Avoid SSRF-ish behavior when the daemon is used as a helper.
+            validate_manual_ip(&ip)
+                .map(|ip| ip.to_string())
+                .map_err(|e| e.into())
+        }
         (None, Some(id)) => {
             let config = load_config()?;
             resolve_ip_from_config(&config, &id)
@@ -586,6 +790,32 @@ fn resolve_ip(ip: Option<String>, id: Option<String>) -> Result<String, Box<dyn 
         }
         (Some(_), Some(_)) => Err("Use either --ip or --id, not both".into()),
         (None, None) => Err("You must provide either --ip or --id".into()),
+    }
+}
+
+fn validate_manual_ip(ip: &str) -> Result<IpAddr, &'static str> {
+    let parsed: IpAddr = ip.parse().map_err(|_| "Invalid IP address.")?;
+    match parsed {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() || v4.is_loopback() || v4.is_multicast() {
+                return Err("IP address is not allowed.");
+            }
+            if v4.is_private() || v4.is_link_local() {
+                Ok(parsed)
+            } else {
+                Err("IP must be a LAN address (private or link-local).")
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
+                return Err("IP address is not allowed.");
+            }
+            if v6.is_unique_local() || v6.is_unicast_link_local() {
+                Ok(parsed)
+            } else {
+                Err("IP must be a LAN address (unique-local or link-local).")
+            }
+        }
     }
 }
 
@@ -678,6 +908,39 @@ fn fetch_accessory_info(client: &Client, ip: &str) -> Option<Value> {
         .ok()?
         .json()
         .ok()
+}
+
+fn fetch_light_state(client: &Client, ip: &str) -> Option<LightState> {
+    let base_url = format!("http://{}:9123/elgato", ip);
+    let payload: LightsPayload<LightState> = client
+        .get(format!("{}/lights", base_url))
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .ok()?;
+    payload.lights.into_iter().next()
+}
+
+fn get_all_light_states(client: &Client) -> Result<Vec<LightStateResponse>, Box<dyn Error>> {
+    let config = load_config()?;
+    let mut states = Vec::new();
+
+    for light in config.lights.iter().filter(|l| l.enabled) {
+        if let Some(ip) = select_address(light) {
+            if let Some(state) = fetch_light_state(client, &ip) {
+                states.push(LightStateResponse {
+                    id: light.id.clone(),
+                    on: state.on == 1,
+                    brightness: state.brightness,
+                    kelvin: mired_to_kelvin(state.temperature),
+                });
+            }
+        }
+    }
+
+    Ok(states)
 }
 
 fn set_light(
@@ -802,6 +1065,22 @@ fn set_light_enabled(id: String, enabled: bool) -> Result<LightRecord, Box<dyn E
     save_config(&config)?;
     Ok(record_clone)
 }
+
+fn set_light_alias(id: String, alias: Option<String>) -> Result<LightRecord, Box<dyn Error>> {
+    let mut config = load_config()?;
+    let record_clone = {
+        let record = config
+            .lights
+            .iter_mut()
+            .find(|light| light.id == id || light.name == id || light.alias.as_deref() == Some(&id))
+            .ok_or_else(|| format!("No persisted light found with id '{}'", id))?;
+        record.alias = alias.filter(|s| !s.trim().is_empty());
+        record.clone()
+    };
+    save_config(&config)?;
+    Ok(record_clone)
+}
+
 fn upsert_record(client: &Client, config: &mut Config, info: &mdns_sd::ResolvedService) {
     let id = info.get_fullname().to_string();
     let now = std::time::SystemTime::now()
@@ -849,16 +1128,27 @@ fn config_path() -> Result<PathBuf, Box<dyn Error>> {
         return Err("Unable to determine config directory".into());
     };
 
-    Ok(base.join("limekit-keylight").join("config.json"))
+    Ok(base.join("sublime-keylight").join("config.json"))
 }
 
 fn load_config() -> Result<Config, Box<dyn Error>> {
     let path = config_path()?;
-    if !path.exists() {
-        return Ok(Config::default());
+    if path.exists() {
+        let bytes = fs::read(&path)?;
+        return Ok(serde_json::from_slice(&bytes)?);
     }
-    let bytes = fs::read(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
+
+    // Backward-compat: migrate old config path (limekit-keylight) to the new SubLime location.
+    let old_path = config_path_legacy()?;
+    if old_path.exists() {
+        let bytes = fs::read(&old_path)?;
+        let config: Config = serde_json::from_slice(&bytes)?;
+        // Best-effort write; if it fails we can still operate off the old file.
+        let _ = save_config(&config);
+        return Ok(config);
+    }
+
+    Ok(Config::default())
 }
 
 fn save_config(config: &Config) -> Result<(), Box<dyn Error>> {
@@ -869,6 +1159,18 @@ fn save_config(config: &Config) -> Result<(), Box<dyn Error>> {
     let bytes = serde_json::to_vec_pretty(config)?;
     fs::write(path, bytes)?;
     Ok(())
+}
+
+fn config_path_legacy() -> Result<PathBuf, Box<dyn Error>> {
+    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config")
+    } else {
+        return Err("Unable to determine config directory".into());
+    };
+
+    Ok(base.join("limekit-keylight").join("config.json"))
 }
 
 #[cfg(test)]

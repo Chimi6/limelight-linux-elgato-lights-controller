@@ -1,0 +1,15 @@
+target/
+**/target/
+.env
+.env.*
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Cursor / IDE artifacts
+.cursor/
+
+# Flatpak build outputs
+flatpak/build-dir/
+flatpak/.flatpak-builder/
