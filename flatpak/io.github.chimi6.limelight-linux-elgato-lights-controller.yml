@@ -32,8 +32,8 @@ modules:
       - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.chimi6.limelight-linux-elgato-lights-controller/LICENSE
     sources:
       - type: archive
-        url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/archive/refs/tags/v0.1.3.tar.gz
-        sha256: cd9e09ec6c8bb19082c22c067a174807b6b9420281eea250340b62d5dfcbef4b
+        url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/archive/refs/tags/v0.1.4.tar.gz
+        sha256: 2297258b29803de0808324a3f152c7965b22f05509ca61da480b644d4e2c8592
         strip-components: 1
       - cargo-sources.json
       - type: shell
