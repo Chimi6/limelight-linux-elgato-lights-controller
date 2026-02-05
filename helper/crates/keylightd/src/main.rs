@@ -1128,7 +1128,7 @@ fn config_path() -> Result<PathBuf, Box<dyn Error>> {
         return Err("Unable to determine config directory".into());
     };
 
-    Ok(base.join("sublime-keylight").join("config.json"))
+    Ok(base.join("limelight-keylight").join("config.json"))
 }
 
 fn load_config() -> Result<Config, Box<dyn Error>> {
@@ -1138,7 +1138,7 @@ fn load_config() -> Result<Config, Box<dyn Error>> {
         return Ok(serde_json::from_slice(&bytes)?);
     }
 
-    // Backward-compat: migrate old config path (limekit-keylight) to the new SubLime location.
+    // Backward-compat: migrate old config path (limekit-keylight) to the new LimeLight location.
     let old_path = config_path_legacy()?;
     if old_path.exists() {
         let bytes = fs::read(&old_path)?;

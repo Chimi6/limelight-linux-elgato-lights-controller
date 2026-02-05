@@ -1,6 +1,6 @@
-# SubLime / `keylightd` API
+# LimeLight / `keylightd` API
 
-`keylightd` exposes a small localhost HTTP API used by the SubLime UI and intended for third-party integrations (e.g. Open Deck).
+`keylightd` exposes a small localhost HTTP API used by the LimeLight UI and intended for third-party integrations (e.g. Open Deck).
 
 - **Base URL**: `http://127.0.0.1:9124`
 - **Content-Type**: `application/json`

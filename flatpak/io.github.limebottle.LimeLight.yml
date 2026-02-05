@@ -1,10 +1,10 @@
-app-id: io.github.limebottle.SubLime
+app-id: io.github.limebottle.LimeLight
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: sublime
+command: limelight
 finish-args:
   - --share=ipc
   - --share=network
@@ -15,18 +15,18 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
-    CARGO_HOME: /run/build/sublime/cargo
+    CARGO_HOME: /run/build/limelight/cargo
 
 modules:
-  - name: sublime
+  - name: limelight
     buildsystem: simple
     build-commands:
       - cargo --offline build --manifest-path helper/Cargo.toml --release --verbose
       - install -Dm755 helper/target/release/keylightd ${FLATPAK_DEST}/bin/keylightd
-      - install -Dm755 helper/target/release/keylight-tray ${FLATPAK_DEST}/bin/sublime
-      - install -Dm644 public/Limecon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.limebottle.SubLime.png
-      - install -Dm644 flatpak/io.github.limebottle.SubLime.desktop ${FLATPAK_DEST}/share/applications/io.github.limebottle.SubLime.desktop
-      - install -Dm644 flatpak/io.github.limebottle.SubLime.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.limebottle.SubLime.metainfo.xml
+      - install -Dm755 helper/target/release/keylight-tray ${FLATPAK_DEST}/bin/limelight
+      - install -Dm644 public/Limecon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.limebottle.LimeLight.png
+      - install -Dm644 flatpak/io.github.limebottle.LimeLight.desktop ${FLATPAK_DEST}/share/applications/io.github.limebottle.LimeLight.desktop
+      - install -Dm644 flatpak/io.github.limebottle.LimeLight.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.limebottle.LimeLight.metainfo.xml
     sources:
       - type: dir
         path: ..
@@ -35,4 +35,3 @@ modules:
         commands:
           - mkdir -p helper/.cargo
           - cp -vf helper/cargo/config helper/.cargo/config.toml
-

@@ -1,11 +1,11 @@
-# SubLime
+# LimeLight
 
 Lightweight Elgato Key Light control for Linux.
 
 I recently switched to Linux (Bazzite/KDE) and there’s no official Elgato Key Light “Control Center” equivalent here.
 Also… Control Center on Windows was a resource hog for me (and it loved to freeze), so I built my own.
 
-SubLime is split into two parts:
+LimeLight is split into two parts:
 
 - **`keylightd` (daemon)**: discovers lights on your LAN, persists them, and talks to the Elgato local API.
 - **`keylight-tray` (desktop UI)**: a small GUI that controls lights via the local daemon API.

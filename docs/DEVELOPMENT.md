@@ -2,7 +2,7 @@
 
 ## Architecture
 
-SubLime is intentionally split:
+LimeLight is intentionally split:
 
 - **`keylightd`**: a small Rust daemon that discovers and controls Elgato Key Lights and exposes a localhost HTTP API.
 - **`keylight-tray`**: an `eframe`/`egui` desktop UI that calls the daemon API.
@@ -13,7 +13,7 @@ This keeps UI concerns separate from networking/discovery and makes it easy to b
 
 `keylightd` persists discovered lights and groups in:
 
-- `~/.config/sublime-keylight/config.json`
+- `~/.config/limelight-keylight/config.json`
 
 If an old config exists at `~/.config/limekit-keylight/config.json`, the daemon will migrate it automatically.
 
