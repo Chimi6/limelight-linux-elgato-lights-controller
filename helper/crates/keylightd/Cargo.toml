@@ -1,0 +1,14 @@
+[package]
+name = "keylightd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.57", features = ["derive"] }
+flume = "0.11.1"
+mdns-sd = "0.17.2"
+reqwest = { version = "0.13.1", features = ["blocking", "json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tiny_http = "0.12.0"
+urlencoding = "2.1.3"

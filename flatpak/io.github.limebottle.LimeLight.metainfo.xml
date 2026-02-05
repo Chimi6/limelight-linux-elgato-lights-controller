@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.limebottle.LimeLight</id>
+  <name>LimeLight</name>
+  <summary>Lightweight controller for Elgato Key Lights</summary>
+  <description>
+    <p>
+      LimeLight is a lightweight Elgato Key Light controller for Linux. It discovers Key Lights on your LAN and lets you
+      control power, brightness, and color temperature without the bloat.
+    </p>
+    <p>
+      It runs a small local helper daemon that talks to the lights and exposes a localhost HTTP API so you can build your
+      own integrations (like an Open Deck plugin).
+    </p>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/Chimi6/limelight-linux-elgato-lights-controller/main/flatpak/screenshots/main.png</image>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/Chimi6/limelight-linux-elgato-lights-controller/main/flatpak/screenshots/discover.png</image>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/Chimi6/limelight-linux-elgato-lights-controller/main/flatpak/screenshots/groups.png</image>
+    </screenshot>
+  </screenshots>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <developer id="io.github.limebottle">
+    <name>LimeBottle</name>
+  </developer>
+  <url type="homepage">https://github.com/Chimi6/limelight-linux-elgato-lights-controller</url>
+  <url type="bugtracker">https://github.com/Chimi6/limelight-linux-elgato-lights-controller/issues</url>
+  <launchable type="desktop-id">io.github.limebottle.LimeLight.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>Settings</category>
+  </categories>
+  <provides>
+    <binary>limelight</binary>
+    <binary>keylightd</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-02-04">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
