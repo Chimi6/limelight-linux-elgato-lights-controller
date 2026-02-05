@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.limebottle.LimeLight</id>
+  <id>io.github.chimi6.limelight-linux-elgato-lights-controller</id>
   <name>LimeLight</name>
   <summary>Lightweight controller for Elgato Key Lights</summary>
   <description>
@@ -26,12 +26,12 @@
   </screenshots>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MPL-2.0</project_license>
-  <developer id="io.github.limebottle">
+  <developer id="io.github.chimi6">
     <name>LimeBottle</name>
   </developer>
   <url type="homepage">https://github.com/Chimi6/limelight-linux-elgato-lights-controller</url>
   <url type="bugtracker">https://github.com/Chimi6/limelight-linux-elgato-lights-controller/issues</url>
-  <launchable type="desktop-id">io.github.limebottle.LimeLight.desktop</launchable>
+  <launchable type="desktop-id">io.github.chimi6.limelight-linux-elgato-lights-controller.desktop</launchable>
   <categories>
     <category>Utility</category>
     <category>Settings</category>
