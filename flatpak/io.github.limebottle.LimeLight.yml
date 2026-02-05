@@ -29,9 +29,12 @@ modules:
       - install -Dm644 public/Limecon-512.png ${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/io.github.limebottle.LimeLight.png
       - install -Dm644 flatpak/io.github.limebottle.LimeLight.desktop ${FLATPAK_DEST}/share/applications/io.github.limebottle.LimeLight.desktop
       - install -Dm644 flatpak/io.github.limebottle.LimeLight.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.limebottle.LimeLight.metainfo.xml
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.limebottle.LimeLight/LICENSE
     sources:
-      - type: dir
-        path: ..
+      - type: archive
+        url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/archive/refs/tags/v0.1.2.tar.gz
+        sha256: 4252720c60755aa709069a35db51ff52081c5265af8fccec7e54b80b1b9ba491
+        strip-components: 1
       - cargo-sources.json
       - type: shell
         commands:
