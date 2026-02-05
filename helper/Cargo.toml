@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "crates/keylightd",
+  "crates/keylight-tray",
+]
+resolver = "2"

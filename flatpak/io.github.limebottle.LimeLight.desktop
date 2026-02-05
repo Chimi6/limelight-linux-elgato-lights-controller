@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LimeLight
+Comment=Elgato Key Light Controller for Linux
+Exec=limelight
+Icon=io.github.limebottle.LimeLight
+StartupWMClass=io.github.limebottle.LimeLight
+Terminal=false
+Categories=Utility;Settings;
+Keywords=elgato;keylight;light;control;stream;
+StartupNotify=true
