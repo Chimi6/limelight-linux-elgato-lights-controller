@@ -99,7 +99,7 @@ Type=Application
 Name=LimeLight
 Comment=Elgato Key Light Controller
 Exec=limelight
-Icon=io.github.limebottle.LimeLight
+Icon=io.github.chimi6.limelight-linux-elgato-lights-controller
 Terminal=false
 Categories=Utility;
 StartupNotify=false
@@ -1361,7 +1361,7 @@ fn main() -> eframe::Result<()> {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([300.0, 360.0])
                 // Important on KDE/Wayland: Plasma uses this app-id to look up the icon from the .desktop file.
-                .with_app_id("io.github.limebottle.LimeLight")
+                .with_app_id("io.github.chimi6.limelight-linux-elgato-lights-controller")
                 .with_title("LimeLight")
                 .with_resizable(true)
                 .with_min_inner_size([280.0, 280.0])

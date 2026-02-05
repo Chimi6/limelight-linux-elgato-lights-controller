@@ -1,4 +1,4 @@
-app-id: io.github.limebottle.LimeLight
+app-id: io.github.chimi6.limelight-linux-elgato-lights-controller
 runtime: org.gnome.Platform
 runtime-version: '48'
 sdk: org.gnome.Sdk
@@ -24,12 +24,12 @@ modules:
       - cargo --offline build --manifest-path helper/Cargo.toml --release --verbose
       - install -Dm755 helper/target/release/keylightd ${FLATPAK_DEST}/bin/keylightd
       - install -Dm755 helper/target/release/keylight-tray ${FLATPAK_DEST}/bin/limelight
-      - install -Dm644 public/Limecon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.limebottle.LimeLight.png
-      - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.limebottle.LimeLight.png
-      - install -Dm644 public/Limecon-512.png ${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/io.github.limebottle.LimeLight.png
-      - install -Dm644 flatpak/io.github.limebottle.LimeLight.desktop ${FLATPAK_DEST}/share/applications/io.github.limebottle.LimeLight.desktop
-      - install -Dm644 flatpak/io.github.limebottle.LimeLight.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.limebottle.LimeLight.metainfo.xml
-      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.limebottle.LimeLight/LICENSE
+      - install -Dm644 public/Limecon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 public/Limecon-512.png ${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.desktop ${FLATPAK_DEST}/share/applications/io.github.chimi6.limelight-linux-elgato-lights-controller.desktop
+      - install -Dm644 flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.chimi6.limelight-linux-elgato-lights-controller/LICENSE
     sources:
       - type: archive
         url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/archive/refs/tags/v0.1.2.tar.gz
