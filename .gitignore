@@ -11,5 +11,11 @@ target/
 .cursor/
 
 # Flatpak build outputs
+build-dir/
+repo/
+.flatpak-builder/
+
+# (Legacy paths if you ever build from inside flatpak/)
 flatpak/build-dir/
+flatpak/repo/
 flatpak/.flatpak-builder/
