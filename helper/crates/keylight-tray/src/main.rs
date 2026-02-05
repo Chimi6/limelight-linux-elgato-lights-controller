@@ -96,17 +96,17 @@ type PendingUpdates = Arc<Mutex<HashMap<String, (String, UpdateRequest)>>>;
 
 const AUTOSTART_DESKTOP: &str = r#"[Desktop Entry]
 Type=Application
-Name=SubLime
+Name=LimeLight
 Comment=Elgato Key Light Controller
-Exec=sublime
-Icon=io.github.limebottle.SubLime
+Exec=limelight
+Icon=io.github.limebottle.LimeLight
 Terminal=false
 Categories=Utility;
 StartupNotify=false
 "#;
 
 fn get_autostart_path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|p| p.join("autostart").join("sublime.desktop"))
+    dirs::config_dir().map(|p| p.join("autostart").join("limelight.desktop"))
 }
 
 fn is_autostart_enabled() -> bool {
@@ -628,7 +628,7 @@ impl eframe::App for KeylightApp {
                     }
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("SubLime")
+                        egui::RichText::new("LimeLight")
                             .size(14.0)
                             .strong()
                             .color(colors::TEXT_PRIMARY),
@@ -1270,7 +1270,7 @@ impl eframe::App for KeylightApp {
                                 });
                                 ui.label(
                                     egui::RichText::new(
-                                        "Launch SubLime automatically when you log in",
+                                        "Launch LimeLight automatically when you log in",
                                     )
                                     .size(9.0)
                                     .color(colors::TEXT_SECONDARY),
@@ -1289,7 +1289,7 @@ impl eframe::App for KeylightApp {
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
-                                    egui::RichText::new("SubLime v0.1.0")
+                                    egui::RichText::new("LimeLight v0.1.0")
                                         .size(10.0)
                                         .color(colors::TEXT_SECONDARY),
                                 );
@@ -1356,13 +1356,13 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_default();
 
     let result = eframe::run_native(
-        "SubLime",
+        "LimeLight",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([300.0, 360.0])
                 // Important on KDE/Wayland: Plasma uses this app-id to look up the icon from the .desktop file.
-                .with_app_id("io.github.limebottle.SubLime")
-                .with_title("SubLime")
+                .with_app_id("io.github.limebottle.LimeLight")
+                .with_title("LimeLight")
                 .with_resizable(true)
                 .with_min_inner_size([280.0, 280.0])
                 .with_close_button(true)

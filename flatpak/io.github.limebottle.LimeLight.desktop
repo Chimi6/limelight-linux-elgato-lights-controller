@@ -1,12 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=SubLime
+Name=LimeLight
 Comment=Elgato Key Light Controller for Linux
-Exec=sublime
-Icon=io.github.limebottle.SubLime
-StartupWMClass=io.github.limebottle.SubLime
+Exec=limelight
+Icon=io.github.limebottle.LimeLight
+StartupWMClass=io.github.limebottle.LimeLight
 Terminal=false
 Categories=Utility;Settings;
 Keywords=elgato;keylight;light;control;stream;
 StartupNotify=true
-
