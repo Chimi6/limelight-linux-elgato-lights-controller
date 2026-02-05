@@ -2,8 +2,8 @@
 
 Lightweight Elgato Key Light control for Linux.
 
-I recently switched to Linux (Bazzite/KDE) and there’s no official Elgato Key Light “Control Center” equivalent here.
-Also… Control Center on Windows was a resource hog for me (and it loved to freeze), so I built my own.
+I recently started dual booting Linux (Bazzite/KDE) and there’s no official Elgato Key Light “Control Center” equivalent here. So far the only thing missing from mimicing my windows set up
+Additonally… Control Center on Windows was a resource hog for me (and it loved to freeze), so I built my own.
 
 LimeLight is split into two parts:
 
