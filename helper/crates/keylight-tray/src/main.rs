@@ -146,6 +146,20 @@ struct KeylightApp {
     all_kelvin: u16,
     editing_aliases: HashMap<String, String>,
     autostart_enabled: bool,
+    brightness_gradient: Option<egui::TextureHandle>,
+    temperature_gradient: Option<egui::TextureHandle>,
+    url_all: String,
+}
+
+fn configure_egui(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(4.0, 3.0);
+    style.spacing.button_padding = egui::vec2(4.0, 2.0);
+    ctx.set_style(style);
+
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = colors::BG_LIGHT;
+    ctx.set_visuals(visuals);
 }
 
 fn load_svg_texture(
@@ -183,8 +197,55 @@ fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     )
 }
 
+fn create_gradient_texture(
+    ctx: &egui::Context,
+    name: &str,
+    color_a: egui::Color32,
+    color_b: egui::Color32,
+) -> egui::TextureHandle {
+    let w: usize = 256;
+    let h: usize = 18;
+    let r = h as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let mut pixels = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let t = x as f32 / (w - 1) as f32;
+            let color = lerp_color(color_a, color_b, t);
+            let fy = y as f32 + 0.5;
+            let fx = x as f32 + 0.5;
+            let inside = if fx < r {
+                let dx = r - fx;
+                let dy = fy - cy;
+                dx * dx + dy * dy <= r * r
+            } else if fx > w as f32 - r {
+                let dx = fx - (w as f32 - r);
+                let dy = fy - cy;
+                dx * dx + dy * dy <= r * r
+            } else {
+                true
+            };
+            pixels.push(if inside {
+                color
+            } else {
+                egui::Color32::TRANSPARENT
+            });
+        }
+    }
+    let image = egui::ColorImage {
+        size: [w, h],
+        pixels,
+    };
+    ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+}
+
 /// Returns true if the value changed (queue updates on every change, deduplication happens in pending map)
-fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> bool {
+fn brightness_slider(
+    ui: &mut egui::Ui,
+    value: &mut u8,
+    width: f32,
+    gradient: Option<&egui::TextureHandle>,
+) -> bool {
     let height = 18.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::Vec2::new(width, height),
@@ -203,33 +264,12 @@ fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> bool {
         }
     }
 
-    let rounding = height / 2.0;
-    for i in 0..16 {
-        let t = i as f32 / 16.0;
-        let color = lerp_color(colors::BRIGHT_LOW, colors::BRIGHT_HIGH, t);
-        let x = rect.left() + t * rect.width();
-        let w = rect.width() / 16.0 + 1.0;
-        let r = if i == 0 {
-            egui::Rounding {
-                nw: rounding,
-                sw: rounding,
-                ne: 0.0,
-                se: 0.0,
-            }
-        } else if i == 15 {
-            egui::Rounding {
-                nw: 0.0,
-                sw: 0.0,
-                ne: rounding,
-                se: rounding,
-            }
-        } else {
-            egui::Rounding::ZERO
-        };
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(egui::Pos2::new(x, rect.top()), egui::Vec2::new(w, height)),
-            r,
-            color,
+    if let Some(tex) = gradient {
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            egui::Color32::WHITE,
         );
     }
 
@@ -250,7 +290,12 @@ fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> bool {
 }
 
 /// Returns true if the value changed (queue updates on every change, deduplication happens in pending map)
-fn temperature_slider(ui: &mut egui::Ui, kelvin: &mut u16, width: f32) -> bool {
+fn temperature_slider(
+    ui: &mut egui::Ui,
+    kelvin: &mut u16,
+    width: f32,
+    gradient: Option<&egui::TextureHandle>,
+) -> bool {
     let height = 18.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::Vec2::new(width, height),
@@ -269,33 +314,12 @@ fn temperature_slider(ui: &mut egui::Ui, kelvin: &mut u16, width: f32) -> bool {
         }
     }
 
-    let rounding = height / 2.0;
-    for i in 0..16 {
-        let t = i as f32 / 16.0;
-        let color = lerp_color(colors::WARM, colors::COOL, t);
-        let x = rect.left() + t * rect.width();
-        let w = rect.width() / 16.0 + 1.0;
-        let r = if i == 0 {
-            egui::Rounding {
-                nw: rounding,
-                sw: rounding,
-                ne: 0.0,
-                se: 0.0,
-            }
-        } else if i == 15 {
-            egui::Rounding {
-                nw: 0.0,
-                sw: 0.0,
-                ne: rounding,
-                se: rounding,
-            }
-        } else {
-            egui::Rounding::ZERO
-        };
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(egui::Pos2::new(x, rect.top()), egui::Vec2::new(w, height)),
-            r,
-            color,
+    if let Some(tex) = gradient {
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            egui::Color32::WHITE,
         );
     }
 
@@ -379,6 +403,7 @@ impl KeylightApp {
             });
         }
 
+        let url_all = format!("{}/v1/all", api_url);
         let mut app = Self {
             client,
             api_url,
@@ -398,6 +423,9 @@ impl KeylightApp {
             all_brightness: 50,
             all_kelvin: 4500,
             autostart_enabled: is_autostart_enabled(),
+            brightness_gradient: None,
+            temperature_gradient: None,
+            url_all,
         };
         app.refresh_all();
         app
@@ -422,6 +450,22 @@ impl KeylightApp {
         if self.refresh_icon.is_none() {
             let svg = include_bytes!("../../../../public/refresh.svg");
             self.refresh_icon = load_svg_texture(ctx, "refresh", svg, 64, true);
+        }
+        if self.brightness_gradient.is_none() {
+            self.brightness_gradient = Some(create_gradient_texture(
+                ctx,
+                "bright_grad",
+                colors::BRIGHT_LOW,
+                colors::BRIGHT_HIGH,
+            ));
+        }
+        if self.temperature_gradient.is_none() {
+            self.temperature_gradient = Some(create_gradient_texture(
+                ctx,
+                "temp_grad",
+                colors::WARM,
+                colors::COOL,
+            ));
         }
     }
 
@@ -602,16 +646,10 @@ impl KeylightApp {
 impl eframe::App for KeylightApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_textures(ctx);
-        ctx.request_repaint(); // Keep UI responsive during drags
 
-        let mut style = (*ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(4.0, 3.0);
-        style.spacing.button_padding = egui::vec2(4.0, 2.0);
-        ctx.set_style(style);
-
-        let mut visuals = egui::Visuals::light();
-        visuals.panel_fill = colors::BG_LIGHT;
-        ctx.set_visuals(visuals);
+        if ctx.input(|i| i.pointer.any_down()) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
 
         // Header
         egui::TopBottomPanel::top("header")
@@ -807,6 +845,8 @@ impl eframe::App for KeylightApp {
             .show(ctx, |ui| {
                 let w = ui.available_width();
                 let power_tex = self.power_icon.clone();
+                let bright_grad = self.brightness_gradient.clone();
+                let temp_grad = self.temperature_gradient.clone();
 
                 match self.active_tab {
                     Tab::Lights => {
@@ -887,10 +927,9 @@ impl eframe::App for KeylightApp {
                                                 l.on = state;
                                             }
                                         }
-                                        let url = format!("{}/v1/all", self.api_url);
                                         self.queue_update(
                                             "all_power",
-                                            url,
+                                            self.url_all.clone(),
                                             UpdateRequest {
                                                 on: Some(if state { 1 } else { 0 }),
                                                 brightness: None,
@@ -911,17 +950,16 @@ impl eframe::App for KeylightApp {
                                 let sw = w - 16.0;
                                 let mut b = self.all_brightness;
                                 let mut k = self.all_kelvin;
-                                if brightness_slider(ui, &mut b, sw) {
+                                if brightness_slider(ui, &mut b, sw, bright_grad.as_ref()) {
                                     self.all_brightness = b;
                                     for l in &mut self.lights {
                                         if l.enabled {
                                             l.brightness = b;
                                         }
                                     }
-                                    let url = format!("{}/v1/all", self.api_url);
                                     self.queue_update(
                                         "all_b",
-                                        url,
+                                        self.url_all.clone(),
                                         UpdateRequest {
                                             on: None,
                                             brightness: Some(b),
@@ -931,17 +969,16 @@ impl eframe::App for KeylightApp {
                                     );
                                 }
                                 ui.add_space(1.0);
-                                if temperature_slider(ui, &mut k, sw) {
+                                if temperature_slider(ui, &mut k, sw, temp_grad.as_ref()) {
                                     self.all_kelvin = k;
                                     for l in &mut self.lights {
                                         if l.enabled {
                                             l.kelvin = k;
                                         }
                                     }
-                                    let url = format!("{}/v1/all", self.api_url);
                                     self.queue_update(
                                         "all_k",
-                                        url,
+                                        self.url_all.clone(),
                                         UpdateRequest {
                                             on: None,
                                             brightness: None,
@@ -963,7 +1000,6 @@ impl eframe::App for KeylightApp {
                             let mut on = self.lights[index].on;
                             let mut b = self.lights[index].brightness;
                             let mut k = self.lights[index].kelvin;
-                            let pt = power_tex.clone();
 
                             egui::Frame::none()
                                 .fill(colors::BG_CARD)
@@ -973,7 +1009,7 @@ impl eframe::App for KeylightApp {
                                 .show(ui, |ui| {
                                     ui.set_width(w - 4.0);
                                     ui.horizontal(|ui| {
-                                        if power_button(ui, &mut on, 26.0, pt.as_ref()) {
+                                        if power_button(ui, &mut on, 26.0, power_tex.as_ref()) {
                                             self.lights[index].on = on;
                                             let url = format!(
                                                 "{}/v1/lights/{}",
@@ -1002,7 +1038,7 @@ impl eframe::App for KeylightApp {
                                     });
                                     ui.add_space(2.0);
                                     let sw = w - 16.0;
-                                    if brightness_slider(ui, &mut b, sw) {
+                                    if brightness_slider(ui, &mut b, sw, bright_grad.as_ref()) {
                                         self.lights[index].brightness = b;
                                         let url = format!(
                                             "{}/v1/lights/{}",
@@ -1021,7 +1057,7 @@ impl eframe::App for KeylightApp {
                                         );
                                     }
                                     ui.add_space(1.0);
-                                    if temperature_slider(ui, &mut k, sw) {
+                                    if temperature_slider(ui, &mut k, sw, temp_grad.as_ref()) {
                                         self.lights[index].kelvin = k;
                                         let url = format!(
                                             "{}/v1/lights/{}",
@@ -1113,20 +1149,26 @@ impl eframe::App for KeylightApp {
                             ui.add_space(4.0);
                         }
 
-                        let groups = self.groups.clone();
-                        for group in groups {
-                            let ctrl = self.group_controls.entry(group.name.clone()).or_insert(
-                                GroupControl {
-                                    on: true,
-                                    brightness: 50,
-                                    kelvin: 4500,
-                                },
-                            );
+                        for gi in 0..self.groups.len() {
+                            let name = self.groups[gi].name.clone();
+                            let member_count = self.groups[gi].members.len();
+                            if !self.group_controls.contains_key(&name) {
+                                self.group_controls.insert(
+                                    name.clone(),
+                                    GroupControl {
+                                        on: true,
+                                        brightness: 50,
+                                        kelvin: 4500,
+                                    },
+                                );
+                            }
+                            let ctrl = self
+                                .group_controls
+                                .get_mut(&name)
+                                .expect("group_controls missing entry for group");
                             let mut on = ctrl.on;
                             let mut b = ctrl.brightness;
                             let mut k = ctrl.kelvin;
-                            let name = group.name.clone();
-                            let pt = power_tex.clone();
 
                             egui::Frame::none()
                                 .fill(colors::BG_CARD)
@@ -1136,7 +1178,7 @@ impl eframe::App for KeylightApp {
                                 .show(ui, |ui| {
                                     ui.set_width(w - 4.0);
                                     ui.horizontal(|ui| {
-                                        if power_button(ui, &mut on, 26.0, pt.as_ref()) {
+                                        if power_button(ui, &mut on, 26.0, power_tex.as_ref()) {
                                             if let Some(c) = self.group_controls.get_mut(&name) {
                                                 c.on = on;
                                             }
@@ -1166,7 +1208,7 @@ impl eframe::App for KeylightApp {
                                         ui.label(
                                             egui::RichText::new(format!(
                                                 "({})",
-                                                group.members.len()
+                                                member_count
                                             ))
                                             .size(9.0)
                                             .color(colors::TEXT_SECONDARY),
@@ -1182,7 +1224,7 @@ impl eframe::App for KeylightApp {
                                     });
                                     ui.add_space(2.0);
                                     let sw = w - 16.0;
-                                    if brightness_slider(ui, &mut b, sw) {
+                                    if brightness_slider(ui, &mut b, sw, bright_grad.as_ref()) {
                                         if let Some(c) = self.group_controls.get_mut(&name) {
                                             c.brightness = b;
                                         }
@@ -1203,7 +1245,7 @@ impl eframe::App for KeylightApp {
                                         );
                                     }
                                     ui.add_space(1.0);
-                                    if temperature_slider(ui, &mut k, sw) {
+                                    if temperature_slider(ui, &mut k, sw, temp_grad.as_ref()) {
                                         if let Some(c) = self.group_controls.get_mut(&name) {
                                             c.kelvin = k;
                                         }
@@ -1369,7 +1411,10 @@ fn main() -> eframe::Result<()> {
                 .with_icon(icon),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(KeylightApp::new()))),
+        Box::new(|cc| {
+            configure_egui(&cc.egui_ctx);
+            Ok(Box::new(KeylightApp::new()))
+        }),
     );
 
     // Clean up daemon when app exits
