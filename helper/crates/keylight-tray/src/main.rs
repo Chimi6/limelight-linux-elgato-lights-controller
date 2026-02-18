@@ -4,7 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn malloc_trim(__pad: usize) -> std::ffi::c_int;
+}
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:9124";
 
@@ -149,6 +154,7 @@ struct KeylightApp {
     brightness_gradient: Option<egui::TextureHandle>,
     temperature_gradient: Option<egui::TextureHandle>,
     url_all: String,
+    last_trim: Instant,
 }
 
 fn configure_egui(ctx: &egui::Context) {
@@ -426,6 +432,7 @@ impl KeylightApp {
             brightness_gradient: None,
             temperature_gradient: None,
             url_all,
+            last_trim: Instant::now(),
         };
         app.refresh_all();
         app
@@ -646,6 +653,12 @@ impl KeylightApp {
 impl eframe::App for KeylightApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_textures(ctx);
+
+        #[cfg(target_os = "linux")]
+        if self.last_trim.elapsed() >= Duration::from_secs(5) {
+            self.last_trim = Instant::now();
+            unsafe { malloc_trim(0) };
+        }
 
         if ctx.input(|i| i.pointer.any_down()) {
             ctx.request_repaint_after(Duration::from_millis(16));
