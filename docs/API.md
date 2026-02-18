@@ -1,15 +1,74 @@
 # LimeLight / `keylightd` API
 
-`keylightd` exposes a small localhost HTTP API used by the LimeLight UI and intended for third-party integrations (e.g. Open Deck).
+`keylightd` exposes a small **localhost** HTTP JSON API. The LimeLight GUI uses it, and it’s also intended for third‑party integrations (scripts, Open Deck, etc).
 
-- **Base URL**: `http://127.0.0.1:9124`
+## Quick start
+
+- **Base URL (default)**: `http://127.0.0.1:9124`
 - **Content-Type**: `application/json`
-- **Notes**:
-  - The daemon binds to **localhost** only.
-  - Requests have a **64KiB** body limit.
-  - Basic rate limiting exists (high enough to keep sliders responsive).
+- **Local only**: the daemon binds to `127.0.0.1` only (no LAN access)
+- **Limits**:
+  - Request body: **64 KiB**
+  - Basic rate limiting (high enough for “live” sliders)
 
-## Endpoints
+If you’re building an integration, the usual flow is:
+
+1. Trigger discovery: `POST /v1/lights/refresh`
+2. Read persisted lights: `GET /v1/lights`
+3. Read current states (optional, for UI): `GET /v1/lights/states`
+4. Send updates: `PUT /v1/lights/{id}`, `PUT /v1/groups/{name}`, or `PUT /v1/all`
+
+## Common `curl` examples
+
+Health check:
+
+```bash
+curl -s http://127.0.0.1:9124/v1/health
+```
+
+Discover lights (mDNS scan, ~3 seconds):
+
+```bash
+curl -s -X POST http://127.0.0.1:9124/v1/lights/refresh
+```
+
+List persisted lights:
+
+```bash
+curl -s http://127.0.0.1:9124/v1/lights
+```
+
+Fetch current states (on/brightness/temperature) for enabled + reachable lights:
+
+```bash
+curl -s http://127.0.0.1:9124/v1/lights/states
+```
+
+Turn on a specific light:
+
+```bash
+curl -s -X PUT http://127.0.0.1:9124/v1/lights/<light-id> \
+  -H 'content-type: application/json' \
+  -d '{"on":1}'
+```
+
+Set brightness (0..100) and temperature (kelvin):
+
+```bash
+curl -s -X PUT http://127.0.0.1:9124/v1/lights/<light-id> \
+  -H 'content-type: application/json' \
+  -d '{"brightness":40,"kelvin":5500}'
+```
+
+Apply to all enabled lights:
+
+```bash
+curl -s -X PUT http://127.0.0.1:9124/v1/all \
+  -H 'content-type: application/json' \
+  -d '{"on":0}'
+```
+
+## Endpoint reference
 
 ### Health
 
@@ -36,6 +95,10 @@ Request:
 ```json
 { "ip": "192.168.1.106" }
 ```
+
+Notes:
+- This is mainly a fallback when mDNS discovery doesn’t work.
+- Only private/LAN ranges are accepted (to avoid SSRF).
 
 ### Discovery / Refresh
 
@@ -93,6 +156,10 @@ Fields are optional:
 - `kelvin`: `2900..7000`
 - `mired`: `143..344` (alternative to `kelvin`)
 
+Notes:
+- Updates are sent to the physical light on your LAN (Elgato’s local API).
+- If you send both `kelvin` and `mired`, `kelvin` is preferred.
+
 ### Groups
 
 **GET** `/v1/groups`
@@ -134,3 +201,10 @@ Status codes:
 - `429`: too many requests
 - `500`: internal server error
 
+## Practical notes for Open Deck / scripts
+
+- **Light IDs**: Use the `id` returned by `GET /v1/lights` (it’s stable across IP changes).
+- **Aliases**: You can show a friendly name using `alias` (set via `PUT /v1/lights/{id}/alias`).
+- **Discovery vs control**:
+  - Discovery persists lights (and updates IPs when they change).
+  - Control endpoints operate on enabled lights and apply immediately.
