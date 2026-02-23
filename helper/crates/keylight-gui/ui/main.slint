@@ -1,6 +1,37 @@
 // LimeLight — Early 2000s widget style (design spec)
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 
+// ---- Data models ----
+export struct LightData {
+    id: string,
+    name: string,
+    brightness: float,
+    warmth: float,
+    power-on: bool,
+    is-all: bool,
+}
+
+export struct GroupData {
+    name: string,
+    brightness: float,
+    warmth: float,
+    power-on: bool,
+}
+
+export struct ManageLightEntry {
+    id: string,
+    name: string,
+    alias: string,
+    enabled: bool,
+    reachable: bool,
+}
+
+export struct GroupLightPick {
+    id: string,
+    name: string,
+    selected: bool,
+}
+
 // ---- Design tokens ----
 export global Tokens {
     // Header
@@ -72,6 +103,7 @@ component GelSlider {
     in-out property <float> value: 0.5;
     in property <bool> is-warmth: false;
     callback changed(float);
+    callback released(float);
 
     height: 16px;
 
@@ -128,6 +160,9 @@ component GelSlider {
             if (event.kind == PointerEventKind.down) {
                 root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
                 root.changed(root.value);
+            }
+            if (event.kind == PointerEventKind.up) {
+                root.released(root.value);
             }
         }
         moved => {
@@ -317,6 +352,7 @@ component LightCard {
     callback brightness-changed(float);
     callback warmth-changed(float);
     callback power-toggled();
+    callback slider-released();
 
     Rectangle {
         border-radius: 12px;
@@ -343,7 +379,6 @@ component LightCard {
                     width: 28px;
                     height: 28px;
                     clicked => {
-                        root.power-on = !root.power-on;
                         root.power-toggled();
                     }
                     Rectangle {
@@ -397,6 +432,7 @@ component LightCard {
                     font-family: "Segoe UI";
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                    overflow: elide;
                 }
             }
 
@@ -404,11 +440,491 @@ component LightCard {
                 value <=> root.brightness;
                 is-warmth: false;
                 changed(v) => { root.brightness-changed(v); }
+                released(v) => { root.slider-released(); }
             }
             GelSlider {
                 value <=> root.warmth;
                 is-warmth: true;
                 changed(v) => { root.warmth-changed(v); }
+                released(v) => { root.slider-released(); }
+            }
+        }
+    }
+}
+
+// ---- Manage lights panel ----
+component ManageLightRow {
+    in property <string> name;
+    in property <bool> enabled;
+    in property <bool> reachable;
+    callback toggled();
+    callback rename(string);
+    callback deleted();
+
+    height: 36px;
+
+    HorizontalBox {
+        spacing: 8px;
+        padding-left: 4px;
+        padding-right: 4px;
+
+        // Reachability dot
+        Rectangle {
+            width: 10px;
+            height: 10px;
+            y: (parent.height - 10px) / 2;
+            border-radius: 5px;
+            background: root.reachable ? #4CAF63 : #E8943A;
+            drop-shadow-blur: root.reachable ? 6px : 4px;
+            drop-shadow-color: root.reachable ? rgba(76, 175, 99, 0.35) : rgba(232, 148, 58, 0.25);
+        }
+
+        // Name (editable on click)
+        Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+            name-input := TextInput {
+                text: root.name;
+                font-size: 13px;
+                font-family: "Segoe UI";
+                color: #2F3B4A;
+                vertical-alignment: center;
+                accepted => { root.rename(self.text); }
+                edited => { root.rename(self.text); }
+            }
+        }
+
+        // Enable/disable checkbox
+        check-touch := TouchArea {
+            width: 22px;
+            height: 22px;
+            clicked => { root.toggled(); }
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.enabled ? rgba(76, 175, 99, 0.70) : rgba(140, 150, 165, 0.50);
+                background: root.enabled
+                    ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                    : @linear-gradient(180deg, #F0F0F0 0%, #D8D8D8 100%);
+                clip: true;
+                Rectangle {
+                    y: 0px;
+                    height: parent.height * 0.40;
+                    background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
+                }
+                if root.enabled: Text {
+                    text: "✓";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: #2E6B3A;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Delete button
+        del-touch := TouchArea {
+            width: 22px;
+            height: 22px;
+            clicked => { root.deleted(); }
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: del-touch.has-hover ? rgba(200, 60, 60, 0.50) : rgba(140, 150, 165, 0.30);
+                background: del-touch.has-hover
+                    ? @linear-gradient(180deg, #FFE0E0 0%, #F5C0C0 100%)
+                    : @linear-gradient(180deg, #F0F0F0 0%, #E0E0E0 100%);
+                Text {
+                    text: "×";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: del-touch.has-hover ? #C03030 : #888888;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component ManagePanel {
+    in property <[ManageLightEntry]> model;
+    in property <bool> scanning;
+    callback scan();
+    callback close();
+    callback enable-toggled(int);
+    callback rename(int, string);
+    callback delete-entry(int);
+
+    Rectangle {
+        border-radius: 12px;
+        clip: true;
+        background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
+        drop-shadow-blur: 12px;
+        drop-shadow-color: rgba(0, 0, 0, 0.15);
+        drop-shadow-offset-y: 2px;
+
+        Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+        Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.12); }
+
+        VerticalBox {
+            padding: 10px;
+            spacing: 8px;
+
+            // Header row
+            HorizontalBox {
+                spacing: 8px;
+                Text {
+                    text: "Manage Lights";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #2F3B4A;
+                    font-family: "Segoe UI";
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                // Scan button
+                scan-touch := TouchArea {
+                    width: 70px;
+                    height: 28px;
+                    enabled: !root.scanning;
+                    clicked => { root.scan(); }
+                    Rectangle {
+                        width: 70px;
+                        height: 28px;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: root.scanning
+                            ? rgba(76, 175, 99, 0.50)
+                            : (scan-touch.has-hover
+                                ? rgba(44, 94, 143, 0.40)
+                                : rgba(44, 94, 143, 0.25));
+                        background: root.scanning
+                            ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                            : (scan-touch.has-hover
+                                ? @linear-gradient(180deg, #FFFFFF 0%, #EAF4FF 50%, #D4E6FA 100%)
+                                : @linear-gradient(180deg, #F3F9FF 0%, #E2F0FF 50%, #C9E0F8 100%));
+                        clip: true;
+                        Rectangle {
+                            y: 0px;
+                            height: parent.height * 0.45;
+                            background: @linear-gradient(180deg, rgba(255, 255, 255, 0.50) 0%, transparent 100%);
+                        }
+                        Text {
+                            text: root.scanning ? "Scanning…" : "Scan";
+                            font-size: 12px;
+                            font-weight: 600;
+                            font-family: "Segoe UI";
+                            color: root.scanning ? #2E6B3A : #2C5E8F;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Done / close button
+                close-touch := TouchArea {
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.close(); }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: close-touch.has-hover ? rgba(140, 150, 165, 0.50) : rgba(140, 150, 165, 0.25);
+                        background: close-touch.has-hover
+                            ? @linear-gradient(180deg, #FFFFFF 0%, #E8ECF0 100%)
+                            : @linear-gradient(180deg, #F0F4FA 0%, #D8E0EA 100%);
+                        Text {
+                            text: "×";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: #555;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Separator
+            Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+            // Light rows
+            for entry[idx] in root.model: ManageLightRow {
+                name: entry.alias != "" ? entry.alias : entry.name;
+                enabled: entry.enabled;
+                reachable: entry.reachable;
+                toggled => { root.enable-toggled(idx); }
+                rename(new-name) => { root.rename(idx, new-name); }
+                deleted => { root.delete-entry(idx); }
+            }
+
+            // Empty state
+            if root.model.length == 0: Text {
+                text: "No lights found. Press Scan to discover.";
+                font-size: 12px;
+                color: #8899AA;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+// ---- Manage groups panel ----
+component ManageGroupsPanel {
+    in property <[GroupLightPick]> available-lights;
+    in property <[GroupData]> existing-groups;
+    callback close();
+    callback save-group(string);
+    callback delete-group(int);
+    callback toggle-light(int);
+
+    Rectangle {
+        border-radius: 12px;
+        clip: true;
+        background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
+        drop-shadow-blur: 12px;
+        drop-shadow-color: rgba(0, 0, 0, 0.15);
+        drop-shadow-offset-y: 2px;
+
+        Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+        Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.12); }
+
+        VerticalBox {
+            padding: 10px;
+            spacing: 8px;
+
+            // Header
+            HorizontalBox {
+                spacing: 8px;
+                Text {
+                    text: "Manage Groups";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #2F3B4A;
+                    font-family: "Segoe UI";
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                close-touch := TouchArea {
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.close(); }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: close-touch.has-hover ? rgba(140, 150, 165, 0.50) : rgba(140, 150, 165, 0.25);
+                        background: close-touch.has-hover
+                            ? @linear-gradient(180deg, #FFFFFF 0%, #E8ECF0 100%)
+                            : @linear-gradient(180deg, #F0F4FA 0%, #D8E0EA 100%);
+                        Text {
+                            text: "×";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: #555;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+            // ---- Create new group ----
+            Text {
+                text: "Create New Group";
+                font-size: 13px;
+                font-weight: 600;
+                color: #2F3B4A;
+                font-family: "Segoe UI";
+            }
+
+            Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: rgba(140, 150, 165, 0.40);
+                background: #FFFFFF;
+                clip: true;
+                group-name-input := TextInput {
+                    font-size: 13px;
+                    font-family: "Segoe UI";
+                    color: #2F3B4A;
+                    vertical-alignment: center;
+                    x: 6px;
+                    width: parent.width - 12px;
+                }
+            }
+
+            Text {
+                text: "Select Lights:";
+                font-size: 12px;
+                color: #5A6878;
+                font-family: "Segoe UI";
+            }
+
+            for light[idx] in root.available-lights: HorizontalBox {
+                height: 28px;
+                spacing: 8px;
+                padding-left: 4px;
+
+                pick-touch := TouchArea {
+                    width: 20px;
+                    height: 20px;
+                    clicked => { root.toggle-light(idx); }
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: light.selected ? rgba(76, 175, 99, 0.70) : rgba(140, 150, 165, 0.50);
+                        background: light.selected
+                            ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                            : @linear-gradient(180deg, #F0F0F0 0%, #D8D8D8 100%);
+                        clip: true;
+                        Rectangle {
+                            y: 0px;
+                            height: parent.height * 0.40;
+                            background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
+                        }
+                        if light.selected: Text {
+                            text: "✓";
+                            font-size: 14px;
+                            font-weight: 700;
+                            color: #2E6B3A;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    Text {
+                        x: 0px;
+                        text: light.name;
+                        font-size: 13px;
+                        font-family: "Segoe UI";
+                        color: #2F3B4A;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if root.available-lights.length == 0: Text {
+                text: "No lights enabled. Add lights first.";
+                font-size: 12px;
+                color: #8899AA;
+                horizontal-alignment: center;
+            }
+
+            // Save button
+            save-touch := TouchArea {
+                height: 32px;
+                clicked => { root.save-group(group-name-input.text); }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: save-touch.has-hover
+                        ? rgba(76, 175, 99, 0.50)
+                        : rgba(76, 175, 99, 0.30);
+                    background: save-touch.has-hover
+                        ? @linear-gradient(180deg, #D0FAD0 0%, #90E8A0 100%)
+                        : @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%);
+                    clip: true;
+                    Rectangle {
+                        y: 0px;
+                        height: parent.height * 0.45;
+                        background: @linear-gradient(180deg, rgba(255, 255, 255, 0.50) 0%, transparent 100%);
+                    }
+                    Text {
+                        text: "Save Group";
+                        font-size: 13px;
+                        font-weight: 600;
+                        font-family: "Segoe UI";
+                        color: #2E6B3A;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- Existing groups ----
+            if root.existing-groups.length > 0: Rectangle {
+                height: 1px;
+                background: rgba(0, 0, 0, 0.08);
+            }
+
+            if root.existing-groups.length > 0: Text {
+                text: "Existing Groups";
+                font-size: 13px;
+                font-weight: 600;
+                color: #2F3B4A;
+                font-family: "Segoe UI";
+            }
+
+            for group[idx] in root.existing-groups: HorizontalBox {
+                height: 32px;
+                spacing: 8px;
+                padding-left: 4px;
+                padding-right: 4px;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    Text {
+                        x: 0px;
+                        text: group.name;
+                        font-size: 13px;
+                        font-family: "Segoe UI";
+                        color: #2F3B4A;
+                        vertical-alignment: center;
+                    }
+                }
+
+                gdel-touch := TouchArea {
+                    width: 22px;
+                    height: 22px;
+                    clicked => { root.delete-group(idx); }
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: gdel-touch.has-hover ? rgba(200, 60, 60, 0.50) : rgba(140, 150, 165, 0.30);
+                        background: gdel-touch.has-hover
+                            ? @linear-gradient(180deg, #FFE0E0 0%, #F5C0C0 100%)
+                            : @linear-gradient(180deg, #F0F0F0 0%, #E0E0E0 100%);
+                        Text {
+                            text: "×";
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: gdel-touch.has-hover ? #C03030 : #888888;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if root.existing-groups.length == 0: Text {
+                text: "No groups yet.";
+                font-size: 12px;
+                color: #8899AA;
+                horizontal-alignment: center;
             }
         }
     }
@@ -434,6 +950,36 @@ export component MainWindow inherits Window {
     callback drag-window-by(int, int);
     callback reset-drag-state();
 
+    // Light model callbacks (index into lights-model)
+    callback light-brightness-changed(int, float);
+    callback light-warmth-changed(int, float);
+    callback light-power-toggled(int);
+    callback light-slider-released(int);
+
+    // Group model callbacks (index into groups-model)
+    callback group-brightness-changed(int, float);
+    callback group-warmth-changed(int, float);
+    callback group-power-toggled(int);
+    callback group-slider-released(int);
+
+    // Manage lights panel callbacks
+    callback request-scan();
+    callback manage-enable-toggled(int);
+    callback manage-rename(int, string);
+    callback manage-delete(int);
+    callback manage-close();
+
+    // Manage groups panel callbacks
+    callback request-groups-panel();
+    callback group-pick-toggled(int);
+    callback group-manage-save(string);
+    callback group-manage-delete(int);
+    callback group-manage-close();
+
+    // Settings
+    callback autostart-toggled(bool);
+    in-out property <bool> autostart-enabled: false;
+
     reset-drag-state => {
         root.header-reset-key = 1 - root.header-reset-key;
     }
@@ -443,6 +989,14 @@ export component MainWindow inherits Window {
     in-out property <int> header-reset-key: 0;
     in-out property <length> drag-last-x: 0px;
     in-out property <length> drag-last-y: 0px;
+    in-out property <bool> manage-panel-open: false;
+    in-out property <bool> groups-panel-open: false;
+    in-out property <bool> scanning: false;
+
+    in property <[LightData]> lights-model;
+    in property <[GroupData]> groups-model;
+    in property <[ManageLightEntry]> manage-model;
+    in property <[GroupLightPick]> group-lights-pick;
 
     VerticalBox {
         padding: 12px;
@@ -542,7 +1096,15 @@ export component MainWindow inherits Window {
                             width: 30px;
                             height: 30px;
                             y: (parent.height - 30px) / 2;
-                            clicked => { root.request-add(); }
+                            clicked => {
+                                if root.selected-tab == 0 {
+                                    root.manage-panel-open = !root.manage-panel-open;
+                                    root.request-add();
+                                } else if root.selected-tab == 1 {
+                                    root.groups-panel-open = !root.groups-panel-open;
+                                    root.request-groups-panel();
+                                }
+                            }
                             Rectangle {
                                 width: 30px;
                                 height: 30px;
@@ -602,7 +1164,8 @@ export component MainWindow inherits Window {
                         background: rgba(255, 255, 255, 0.06);
                     }
 
-                    Flickable {
+                    // Tab 0: Lights
+                    if root.selected-tab == 0: Flickable {
                         VerticalBox {
                             padding-left: 14px;
                             padding-right: 14px;
@@ -611,21 +1174,191 @@ export component MainWindow inherits Window {
                             spacing: 10px;
                             alignment: start;
 
-                            LightCard {
-                                name: "Key Light";
-                                brightness: 0.7;
-                                warmth: 0.4;
+                            if root.manage-panel-open: ManagePanel {
+                                model: root.manage-model;
+                                scanning: root.scanning;
+                                scan => { root.request-scan(); }
+                                close => {
+                                    root.manage-panel-open = false;
+                                    root.manage-close();
+                                }
+                                enable-toggled(idx) => { root.manage-enable-toggled(idx); }
+                                rename(idx, name) => { root.manage-rename(idx, name); }
+                                delete-entry(idx) => { root.manage-delete(idx); }
                             }
-                            LightCard {
-                                name: "Fill Light";
-                                brightness: 0.45;
-                                warmth: 0.6;
+
+                            for light[idx] in root.lights-model: LightCard {
+                                name: light.name;
+                                brightness: light.brightness;
+                                warmth: light.warmth;
+                                power-on: light.power-on;
+                                brightness-changed(v) => { root.light-brightness-changed(idx, v); }
+                                warmth-changed(v) => { root.light-warmth-changed(idx, v); }
+                                power-toggled() => { root.light-power-toggled(idx); }
+                                slider-released() => { root.light-slider-released(idx); }
                             }
-                            LightCard {
-                                name: "Back Light";
-                                brightness: 0.3;
-                                warmth: 0.25;
-                                power-on: false;
+                        }
+                    }
+
+                    // Tab 1: Groups
+                    if root.selected-tab == 1: Flickable {
+                        VerticalBox {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 14px;
+                            padding-bottom: 14px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            if root.groups-panel-open: ManageGroupsPanel {
+                                available-lights: root.group-lights-pick;
+                                existing-groups: root.groups-model;
+                                close => {
+                                    root.groups-panel-open = false;
+                                    root.group-manage-close();
+                                }
+                                save-group(name) => { root.group-manage-save(name); }
+                                delete-group(idx) => { root.group-manage-delete(idx); }
+                                toggle-light(idx) => { root.group-pick-toggled(idx); }
+                            }
+
+                            for group[idx] in root.groups-model: LightCard {
+                                name: group.name;
+                                brightness: group.brightness;
+                                warmth: group.warmth;
+                                power-on: group.power-on;
+                                brightness-changed(v) => { root.group-brightness-changed(idx, v); }
+                                warmth-changed(v) => { root.group-warmth-changed(idx, v); }
+                                power-toggled() => { root.group-power-toggled(idx); }
+                                slider-released() => { root.group-slider-released(idx); }
+                            }
+                        }
+                    }
+
+                    // Tab 2: Settings
+                    if root.selected-tab == 2: Flickable {
+                        VerticalBox {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 14px;
+                            padding-bottom: 14px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            // Settings card
+                            Rectangle {
+                                vertical-stretch: 0;
+                                border-radius: 12px;
+                                clip: true;
+                                background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
+                                drop-shadow-blur: 12px;
+                                drop-shadow-color: rgba(0, 0, 0, 0.15);
+                                drop-shadow-offset-y: 2px;
+
+                                Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+                                Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.12); }
+
+                                VerticalBox {
+                                    padding: 10px;
+                                    spacing: 12px;
+
+                                    Text {
+                                        text: "Settings";
+                                        font-size: 15px;
+                                        font-weight: 700;
+                                        color: #2F3B4A;
+                                        font-family: "Segoe UI";
+                                    }
+
+                                    Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                                    // Start on login toggle row
+                                    HorizontalBox {
+                                        spacing: 10px;
+
+                                        VerticalBox {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Start on login";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: #2F3B4A;
+                                                font-family: "Segoe UI";
+                                            }
+                                            Text {
+                                                text: "Launch LimeLight automatically when you log in";
+                                                font-size: 11px;
+                                                color: #6A7A8A;
+                                                font-family: "Segoe UI";
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        // Toggle switch
+                                        autostart-touch := TouchArea {
+                                            width: 44px;
+                                            height: 24px;
+                                            clicked => { root.autostart-toggled(!root.autostart-enabled); }
+                                            Rectangle {
+                                                width: 44px;
+                                                height: 24px;
+                                                border-radius: 12px;
+                                                border-width: 1px;
+                                                border-color: root.autostart-enabled
+                                                    ? rgba(76, 175, 99, 0.70)
+                                                    : rgba(140, 150, 165, 0.50);
+                                                background: root.autostart-enabled
+                                                    ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                                                    : @linear-gradient(180deg, #E8E8E8 0%, #CCCCCC 100%);
+                                                clip: true;
+
+                                                Rectangle {
+                                                    y: 0px;
+                                                    height: parent.height * 0.40;
+                                                    background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
+                                                }
+
+                                                // Thumb
+                                                Rectangle {
+                                                    x: root.autostart-enabled ? parent.width - self.width - 3px : 3px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    width: 18px;
+                                                    height: 18px;
+                                                    border-radius: 9px;
+                                                    background: @linear-gradient(180deg, #FFFFFF 0%, #F0F0F0 100%);
+                                                    drop-shadow-blur: 3px;
+                                                    drop-shadow-color: rgba(0, 0, 0, 0.20);
+                                                    drop-shadow-offset-y: 1px;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                                    // About section
+                                    Text {
+                                        text: "About";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #2F3B4A;
+                                        font-family: "Segoe UI";
+                                    }
+                                    Text {
+                                        text: "LimeLight v0.1.0";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #4A5A6A;
+                                        font-family: "Segoe UI";
+                                    }
+                                    Text {
+                                        text: "Elgato Key Light Controller for Linux";
+                                        font-size: 12px;
+                                        color: #6A7A8A;
+                                        font-family: "Segoe UI";
+                                    }
+                                }
                             }
                         }
                     }
