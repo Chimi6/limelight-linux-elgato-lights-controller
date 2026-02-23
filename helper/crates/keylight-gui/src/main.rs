@@ -18,6 +18,20 @@ use winit::event::WindowEvent;
 
 slint::include_modules!();
 
+/// Load and set the window icon from the assets (taskbar/dock).
+fn set_window_icon(ui: &MainWindow) {
+    let icon_bytes = include_bytes!("../assets/Limecon-256.png");
+    if let Ok(img) = image::load_from_memory(icon_bytes) {
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        if let Ok(icon) = winit::window::Icon::from_rgba(rgba.into_raw(), w, h) {
+            ui.window().with_winit_window(|w| {
+                w.set_window_icon(Some(icon));
+            });
+        }
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     ensure_daemon_running();
 
@@ -33,6 +47,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let cmd_tx = update_queue::spawn(api);
 
     let ui = MainWindow::new()?;
+    // Match KDE/Wayland taskbar grouping to the Flatpak desktop id.
+    // Slint platform is initialized after MainWindow::new(), but before ui.run().
+    let xdg_app_id = std::env::var("FLATPAK_ID")
+        .unwrap_or_else(|_| "io.github.chimi6.limelight-linux-elgato-lights-controller".into());
+    if let Err(e) = slint::set_xdg_app_id(xdg_app_id.clone()) {
+        eprintln!("set_xdg_app_id({xdg_app_id}) failed: {e}");
+    }
+    set_window_icon(&ui);
 
     // Build lights model: ALL card first, then individual reachable lights
     let lights_model = Rc::new(VecModel::<LightData>::default());
