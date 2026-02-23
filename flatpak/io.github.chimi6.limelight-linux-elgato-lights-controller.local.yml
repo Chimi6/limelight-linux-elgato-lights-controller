@@ -33,10 +33,15 @@ modules:
       - install -Dm644 flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml
       - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.chimi6.limelight-linux-elgato-lights-controller/LICENSE
     sources:
-      - type: archive
-        url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/archive/refs/tags/v0.1.4.tar.gz
-        sha256: 2297258b29803de0808324a3f152c7965b22f05509ca61da480b644d4e2c8592
-        strip-components: 1
+      # Local dev build: use the current working tree (repo root).
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - build-dir
+          - build-dir-mirror
+          - repo
+          - helper/target
       - cargo-sources.json
       - type: shell
         commands:

@@ -1,0 +1,19 @@
+[package]
+name = "keylight-gui"
+version = "0.1.0"
+edition = "2021"
+description = "LimeLight desktop GUI — controls Elgato Key Lights via keylightd API"
+build = "build.rs"
+
+[build-dependencies]
+slint-build = "1.14"
+
+[dependencies]
+slint = "1.14"
+i-slint-backend-winit = "=1.14"
+winit = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+image = "0.25"
