@@ -2,5 +2,6 @@
 members = [
   "crates/keylightd",
   "crates/keylight-tray",
+  "crates/keylight-gui",
 ]
 resolver = "2"

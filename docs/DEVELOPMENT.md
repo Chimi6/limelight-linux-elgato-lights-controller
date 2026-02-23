@@ -5,7 +5,7 @@
 LimeLight is intentionally split:
 
 - **`keylightd`**: a small Rust daemon that discovers and controls Elgato Key Lights and exposes a localhost HTTP API.
-- **`keylight-tray`**: an `eframe`/`egui` desktop UI that calls the daemon API.
+- **`keylight-gui`**: a standalone desktop GUI (its own crate) that talks to the daemon API.
 
 This keeps UI concerns separate from networking/discovery and makes it easy to build integrations (Open Deck plugin, scripts, etc).
 
@@ -31,10 +31,10 @@ Run the daemon:
 cargo run -p keylightd -- serve --port 9124
 ```
 
-Run the UI:
+Run the GUI:
 
 ```bash
-cargo run -p keylight-tray
+cargo run -p keylight-gui
 ```
 
 ## Code quality

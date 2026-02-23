@@ -1,0 +1,47 @@
+app-id: io.github.chimi6.limelight-linux-elgato-lights-controller
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: limelight
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/limelight/cargo
+
+modules:
+  - name: limelight
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --manifest-path helper/Cargo.toml --release --verbose
+      - install -Dm755 helper/target/release/keylightd ${FLATPAK_DEST}/bin/keylightd
+      - install -Dm755 helper/target/release/keylight-tray ${FLATPAK_DEST}/bin/limelight
+      - install -Dm644 public/Limecon.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 public/Limecon-512.png ${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
+      - install -Dm644 flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.desktop ${FLATPAK_DEST}/share/applications/io.github.chimi6.limelight-linux-elgato-lights-controller.desktop
+      - install -Dm644 flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.chimi6.limelight-linux-elgato-lights-controller.metainfo.xml
+      - install -Dm644 LICENSE ${FLATPAK_DEST}/share/licenses/io.github.chimi6.limelight-linux-elgato-lights-controller/LICENSE
+    sources:
+      # Local dev build: use the current working tree (repo root).
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - build-dir
+          - build-dir-mirror
+          - repo
+          - helper/target
+      - cargo-sources.json
+      - type: shell
+        commands:
+          - mkdir -p helper/.cargo
+          - cp -vf helper/cargo/config helper/.cargo/config.toml

@@ -1,0 +1,636 @@
+// LimeLight — Early 2000s widget style (design spec)
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// ---- Design tokens ----
+export global Tokens {
+    // Header
+    in-out property <brush> header-bg: @linear-gradient(180deg, #F3F6FA 0%, #DCE3EC 50%, #C5CBD4 100%);
+    // Tabs
+    in-out property <brush> tab-selected: @linear-gradient(180deg, #FFFFFF 0%, #EAF3FF 50%, #CFE2F5 100%);
+    in-out property <brush> tab-unselected: @linear-gradient(180deg, #FFFFFF 0%, #EEF4FB 50%, #C9D4E2 100%);
+    // Nav bar background
+    in-out property <brush> nav-bg: @linear-gradient(180deg, #E5EBF3 0%, #CBD6E2 100%);
+    in-out property <color> tab-text-selected: #1F2A38;
+    in-out property <color> tab-text-unselected: #3A4554;
+    // Accent
+    in-out property <color> green-glow: #A8FF60;
+    // Content
+    in-out property <brush> content-bg: @linear-gradient(180deg, #344A66 0%, #1C2636 100%);
+}
+
+// ---- Nav tab button ----
+component TabButton {
+    in-out property <bool> selected: false;
+    in-out property <string> label: "";
+    callback clicked();
+
+    TouchArea {
+        clicked => { root.clicked(); }
+        Rectangle {
+            background: root.selected ? Tokens.tab-selected : Tokens.tab-unselected;
+            border-radius: 16px;
+            clip: true;
+            drop-shadow-blur: root.selected ? 12px : 0px;
+            drop-shadow-color: root.selected ? rgba(0, 0, 0, 0.15) : transparent;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: root.selected ? 2px : 0px;
+
+            // Top inner highlight (white @ 60%)
+            Rectangle {
+                y: 0px;
+                height: 1px;
+                background: rgba(255, 255, 255, 0.60);
+            }
+            // Gloss strip: top 45% of tab
+            Rectangle {
+                y: 0px;
+                height: parent.height * 0.45;
+                background: @linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, transparent 100%);
+            }
+            // Bottom edge (black @ 12%)
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: rgba(0, 0, 0, 0.12);
+            }
+            HorizontalBox {
+                padding: 12px;
+                Text {
+                    text: root.label;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: root.selected ? Tokens.tab-text-selected : Tokens.tab-text-unselected;
+                    font-family: "Segoe UI";
+                }
+            }
+        }
+    }
+}
+
+// ---- Gel slider (static full-width gradient, thumb moves only) ----
+component GelSlider {
+    in-out property <float> value: 0.5;
+    in property <bool> is-warmth: false;
+    callback changed(float);
+
+    height: 16px;
+
+    groove := Rectangle {
+        y: 2px;
+        height: 12px;
+        border-radius: 6px;
+        background: @linear-gradient(180deg, #E4ECF5 0%, #C2D2E3 100%);
+        clip: true;
+
+        Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+        Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.10); }
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: groove.width - 4px;
+            height: groove.height - 4px;
+            border-radius: 5px;
+            background: root.is-warmth
+                ? @linear-gradient(90deg, #6AA8FF 0%, #EAF2FF 50%, #F4B37A 100%)
+                : @linear-gradient(90deg, #2B3443 0%, #6F7F95 50%, #F3F8FF 100%);
+        }
+    }
+
+    Rectangle {
+        x: Math.max(0px, (root.width - 16px) * root.value);
+        y: 0px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: touch.pressed
+            ? @linear-gradient(180deg, #FFFFFF 0%, #F0F4FA 50%, #C9D6E6 100%)
+            : @linear-gradient(180deg, #FFFFFF 0%, #F4F8FD 50%, #D2DFEE 100%);
+        border-width: 1px;
+        border-color: rgba(143, 163, 184, 0.55);
+        drop-shadow-blur: touch.pressed ? 4px : 8px;
+        drop-shadow-color: rgba(0, 0, 0, touch.pressed ? 0.18 : 0.25);
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: touch.pressed ? 0px : 1px;
+        clip: true;
+
+        Rectangle {
+            y: 0px;
+            height: parent.height * 0.50;
+            background: touch.has-hover
+                ? @linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, transparent 100%)
+                : @linear-gradient(180deg, rgba(255, 255, 255, 0.50) 0%, transparent 100%);
+        }
+    }
+
+    touch := TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
+                root.changed(root.value);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
+                root.changed(root.value);
+            }
+        }
+    }
+}
+
+// ---- Reusable header bar (used twice for key-based reset to release pointer capture) ----
+component HeaderBar {
+    callback start-window-drag();
+    callback drag-window-by(int, int);
+    callback request-minimize();
+    callback request-quit();
+
+    in-out property <bool> drag-active: false;
+    in-out property <length> drag-last-x: 0px;
+    in-out property <length> drag-last-y: 0px;
+
+    Rectangle {
+        height: 48px;
+        horizontal-stretch: 1;
+        border-radius: 10px;
+        clip: true;
+        background: Tokens.header-bg;
+
+        // Top inner highlight (white @ 60%)
+        Rectangle {
+            y: 0px;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.60);
+        }
+        // Gloss strip: white→transparent over top 30% of header
+        Rectangle {
+            y: 0px;
+            height: 14px;
+            background: @linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, transparent 100%);
+        }
+
+        HorizontalBox {
+            height: 48px;
+            padding: 0px;
+            spacing: 0px;
+            alignment: center;
+
+            drag_header := TouchArea {
+                width: parent.width - 60px;
+                height: 48px;
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                mouse-cursor: grab;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.start-window-drag();
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        if (!root.drag-active) {
+                            root.drag-active = true;
+                            root.drag-last-x = self.mouse-x;
+                            root.drag-last-y = self.mouse-y;
+                        } else {
+                            root.drag-window-by(
+                                Math.round((self.mouse-x - root.drag-last-x) / 1px),
+                                Math.round((self.mouse-y - root.drag-last-y) / 1px)
+                            );
+                            root.drag-last-x = self.mouse-x;
+                            root.drag-last-y = self.mouse-y;
+                        }
+                    } else {
+                        root.drag-active = false;
+                    }
+                }
+                HorizontalBox {
+                    height: 48px;
+                    spacing: 0;
+                    Rectangle {
+                        HorizontalBox {
+                            height: 48px;
+                            spacing: 8px;
+                            alignment: start;
+                            // Icon with green ambient glow
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                Rectangle {
+                                    width: 40px;
+                                    height: 40px;
+                                    x: -2px;
+                                    y: -4px;
+                                    border-radius: 20px;
+                                    background: rgba(168, 255, 96, 0.12);
+                                    drop-shadow-blur: 18px;
+                                    drop-shadow-color: rgba(168, 255, 96, 0.20);
+                                    drop-shadow-offset-x: 0px;
+                                    drop-shadow-offset-y: -1px;
+                                }
+                                Image {
+                                    source: @image-url("../assets/Limecon-256.png");
+                                    width: 28px;
+                                    height: 28px;
+                                    x: 4px;
+                                    y: 2px;
+                                }
+                            }
+                            Text {
+                                text: "LimeLight";
+                                vertical-alignment: center;
+                                font-size: 18px;
+                                font-weight: 700;
+                                color: #2E3A4A;
+                                font-family: "Segoe UI";
+                            }
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            touch_minimize := TouchArea {
+                width: 30px;
+                clicked => { root.request-minimize(); }
+                Rectangle {
+                    background: touch_minimize.has-hover ? #C8CFD8 : transparent;
+                    border-radius: 6px;
+                    width: 30px;
+                    min-height: 28px;
+                    HorizontalBox {
+                        alignment: center;
+                        Text {
+                            text: "−";
+                            font-size: 18px;
+                            font-family: "Segoe UI";
+                            color: #000000;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            touch_close := TouchArea {
+                width: 30px;
+                clicked => { root.request-quit(); }
+                Rectangle {
+                    background: touch_close.has-hover ? #C8CFD8 : transparent;
+                    border-radius: 6px;
+                    width: 30px;
+                    min-height: 28px;
+                    HorizontalBox {
+                        alignment: center;
+                        Text {
+                            text: "×";
+                            font-size: 18px;
+                            font-family: "Segoe UI";
+                            color: #000000;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bottom inner shadow (black @ 8%)
+        Rectangle {
+            y: 47px;
+            height: 1px;
+            background: rgba(0, 0, 0, 0.08);
+        }
+    }
+}
+
+// ---- Light card (one per discovered light) ----
+component LightCard {
+    in property <string> name: "Key Light";
+    in-out property <float> brightness: 0.5;
+    in-out property <float> warmth: 0.5;
+    in-out property <bool> power-on: true;
+    callback brightness-changed(float);
+    callback warmth-changed(float);
+    callback power-toggled();
+
+    Rectangle {
+        border-radius: 12px;
+        clip: true;
+        background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
+        drop-shadow-blur: 12px;
+        drop-shadow-color: rgba(0, 0, 0, 0.15);
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: 2px;
+
+        Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+        Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.12); }
+
+        VerticalBox {
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 6px;
+
+            HorizontalBox {
+                spacing: 10px;
+                power-touch := TouchArea {
+                    width: 28px;
+                    height: 28px;
+                    clicked => {
+                        root.power-on = !root.power-on;
+                        root.power-toggled();
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: root.power-on
+                            ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                            : @linear-gradient(180deg, #E8E8E8 0%, #CCCCCC 100%);
+                        border-width: 1px;
+                        border-color: root.power-on
+                            ? rgba(76, 175, 99, 0.70)
+                            : rgba(160, 160, 160, 0.50);
+                        drop-shadow-blur: 5px;
+                        drop-shadow-color: rgba(0, 0, 0, 0.18);
+                        drop-shadow-offset-x: 0px;
+                        drop-shadow-offset-y: 1px;
+                        clip: true;
+
+                        // Gloss on top 40% when ON
+                        Rectangle {
+                            y: 0px;
+                            height: root.power-on ? (parent.height * 0.40) : 0px;
+                            background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
+                        }
+
+                        // Icon shadow (black behind glyph for contrast)
+                        Image {
+                            source: @image-url("../assets/power-white.svg");
+                            width: 16px;
+                            height: 16px;
+                            x: (parent.width - self.width) / 2 + 0.5px;
+                            y: (parent.height - self.height) / 2 + 0.5px;
+                            opacity: 0.35;
+                            colorize: #000000;
+                        }
+                        Image {
+                            source: @image-url("../assets/power-white.svg");
+                            width: 16px;
+                            height: 16px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                }
+                Text {
+                    text: root.name;
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #2F3B4A;
+                    font-family: "Segoe UI";
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            GelSlider {
+                value <=> root.brightness;
+                is-warmth: false;
+                changed(v) => { root.brightness-changed(v); }
+            }
+            GelSlider {
+                value <=> root.warmth;
+                is-warmth: true;
+                changed(v) => { root.warmth-changed(v); }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "LimeLight";
+    preferred-width: 400px;
+    preferred-height: 510px;
+    min-width: 280px;
+    no-frame: true;
+    resize-border-width: 8px;
+
+    background: transparent;
+
+    callback nav-lights();
+    callback nav-groups();
+    callback nav-settings();
+    callback request-quit();
+    callback request-minimize();
+    callback request-add();
+    callback start-window-drag();
+    callback drag-window-by(int, int);
+    callback reset-drag-state();
+
+    reset-drag-state => {
+        root.header-reset-key = 1 - root.header-reset-key;
+    }
+
+    in-out property <int> selected-tab: 0;
+    in-out property <bool> drag-active: false;
+    in-out property <int> header-reset-key: 0;
+    in-out property <length> drag-last-x: 0px;
+    in-out property <length> drag-last-y: 0px;
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 0;
+
+        // ---- Widget body: gradient, border, shadow, rounded (fills available space) ----
+        Rectangle {
+            vertical-stretch: 1;
+            background: @linear-gradient(180deg, #E6E9EE 0%, #C9CED6 100%);
+            border-width: 1px;
+            border-color: #8A94A3;
+            border-radius: 10px;
+            drop-shadow-blur: 30px;
+            drop-shadow-color: rgba(0, 0, 0, 0.18);
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 2px;
+            clip: false;
+
+            VerticalBox {
+                spacing: 0;
+
+                // ---- Header: recreated on key toggle to release Wayland pointer capture ----
+                if (root.header-reset-key == 0): HeaderBar {
+                    start-window-drag => { root.start-window-drag(); }
+                    drag-window-by(dx, dy) => { root.drag-window-by(dx, dy); }
+                    request-minimize => { root.request-minimize(); }
+                    request-quit => { root.request-quit(); }
+                    drag-active <=> root.drag-active;
+                    drag-last-x <=> root.drag-last-x;
+                    drag-last-y <=> root.drag-last-y;
+                }
+                if (root.header-reset-key == 1): HeaderBar {
+                    start-window-drag => { root.start-window-drag(); }
+                    drag-window-by(dx, dy) => { root.drag-window-by(dx, dy); }
+                    request-minimize => { root.request-minimize(); }
+                    request-quit => { root.request-quit(); }
+                    drag-active <=> root.drag-active;
+                    drag-last-x <=> root.drag-last-x;
+                    drag-last-y <=> root.drag-last-y;
+                }
+
+                // Glass separator under header
+                Rectangle {
+                    height: 1px;
+                    background: rgba(255, 255, 255, 0.40);
+                }
+                Rectangle {
+                    height: 1px;
+                    background: rgba(0, 0, 0, 0.10);
+                }
+
+                // ---- Nav bar ----
+                Rectangle {
+                    background: Tokens.nav-bg;
+                    // Nav bar gloss
+                    Rectangle {
+                        y: 0px;
+                        height: parent.height * 0.3;
+                        background: @linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, transparent 100%);
+                    }
+                HorizontalBox {
+                    padding: 8px;
+                    spacing: 8px;
+
+                    TabButton {
+                        selected: root.selected-tab == 0;
+                        label: "Lights";
+                        clicked => {
+                            root.selected-tab = 0;
+                            root.nav-lights();
+                        }
+                    }
+                    TabButton {
+                        selected: root.selected-tab == 1;
+                        label: "Groups";
+                        clicked => {
+                            root.selected-tab = 1;
+                            root.nav-groups();
+                        }
+                    }
+                    TabButton {
+                        selected: root.selected-tab == 2;
+                        label: "Settings";
+                        clicked => {
+                            root.selected-tab = 2;
+                            root.nav-settings();
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // + button (visible on Lights and Groups tabs only)
+                    if (root.selected-tab != 2): Rectangle {
+                        width: 30px;
+                        vertical-stretch: 1;
+                        touch-add := TouchArea {
+                            width: 30px;
+                            height: 30px;
+                            y: (parent.height - 30px) / 2;
+                            clicked => { root.request-add(); }
+                            Rectangle {
+                                width: 30px;
+                                height: 30px;
+                                border-radius: 15px;
+                                background: touch-add.has-hover
+                                    ? @linear-gradient(180deg, #FFFFFF 0%, #EAF4FF 50%, #D4E6FA 100%)
+                                    : @linear-gradient(180deg, #F3F9FF 0%, #E2F0FF 50%, #C9E0F8 100%);
+                                border-width: 1px;
+                                border-color: rgba(44, 94, 143, 0.25);
+                                drop-shadow-blur: 4px;
+                                drop-shadow-color: rgba(0, 0, 0, 0.12);
+                                drop-shadow-offset-y: 1px;
+                                clip: true;
+
+                                Rectangle {
+                                    y: 0px;
+                                    height: parent.height * 0.45;
+                                    background: @linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, transparent 100%);
+                                }
+                                Text {
+                                    text: "+";
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    font-family: "Segoe UI";
+                                    color: #2C5E8F;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+                }
+
+                // ---- Content panel ----
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Tokens.content-bg;
+                    border-width: 1px;
+                    border-color: #111315;
+                    min-height: 120px;
+                    clip: true;
+
+                    // Radial green glow (feathered, no visible edge)
+                    Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width;
+                        height: parent.height;
+                        background: @radial-gradient(circle, rgba(124, 255, 138, 0.07) 0%, rgba(124, 255, 138, 0.03) 35%, transparent 65%);
+                    }
+
+                    // Top inner highlight on content border
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        background: rgba(255, 255, 255, 0.06);
+                    }
+
+                    Flickable {
+                        VerticalBox {
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 14px;
+                            padding-bottom: 14px;
+                            spacing: 10px;
+                            alignment: start;
+
+                            LightCard {
+                                name: "Key Light";
+                                brightness: 0.7;
+                                warmth: 0.4;
+                            }
+                            LightCard {
+                                name: "Fill Light";
+                                brightness: 0.45;
+                                warmth: 0.6;
+                            }
+                            LightCard {
+                                name: "Back Light";
+                                brightness: 0.3;
+                                warmth: 0.25;
+                                power-on: false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
