@@ -24,7 +24,7 @@ modules:
     build-commands:
       - cargo --offline build --manifest-path helper/Cargo.toml --release -p keylightd -p keylight-gui --verbose
       - install -Dm755 helper/target/release/keylightd ${FLATPAK_DEST}/bin/keylightd
-      - install -Dm755 helper/target/release/keylight-tray ${FLATPAK_DEST}/bin/limelight
+      - install -Dm755 helper/target/release/keylight-gui ${FLATPAK_DEST}/bin/limelight
       - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/48x48/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
       - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
       - install -Dm644 public/Limecon-256.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/io.github.chimi6.limelight-linux-elgato-lights-controller.png
