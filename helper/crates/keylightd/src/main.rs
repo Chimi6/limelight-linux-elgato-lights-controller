@@ -585,6 +585,16 @@ fn handle_api_request(
                 Err(err) => json_client_error(StatusCode(400), &err.to_string()),
             }
         }
+        (Method::Delete, path) if path.starts_with("/v1/lights/") => {
+            let raw_id = &path["/v1/lights/".len()..];
+            let id = urlencoding::decode(raw_id)
+                .map(|value| value.into_owned())
+                .unwrap_or_else(|_| raw_id.to_string());
+            match delete_light(id) {
+                Ok(_) => json_response(StatusCode(200), &serde_json::json!({"deleted": true})),
+                Err(err) => json_client_error(StatusCode(404), &err.to_string()),
+            }
+        }
         (Method::Delete, path) if path.starts_with("/v1/groups/") => {
             let raw_name = &path["/v1/groups/".len()..];
             let group_name = urlencoding::decode(raw_name)
@@ -1001,6 +1011,19 @@ fn save_group(name: String, mut members: Vec<String>) -> Result<Group, Box<dyn E
     Ok(group)
 }
 
+fn delete_light(id: String) -> Result<(), Box<dyn Error>> {
+    let mut config = load_config()?;
+    let original_len = config.lights.len();
+    config.lights.retain(|light| {
+        light.id != id && light.name != id && light.alias.as_deref() != Some(&id)
+    });
+    if config.lights.len() == original_len {
+        return Err(format!("No persisted light found with id '{}'", id).into());
+    }
+    save_config(&config)?;
+    Ok(())
+}
+
 fn delete_group(name: String) -> Result<(), Box<dyn Error>> {
     let mut config = load_config()?;
     let original_len = config.groups.len();
@@ -1090,7 +1113,7 @@ fn upsert_record(client: &Client, config: &mut Config, info: &mdns_sd::ResolvedS
     let existing = config.lights.iter().find(|item| item.id == id);
     let alias = existing.and_then(|item| item.alias.clone());
     let previous_accessory = existing.and_then(|item| item.accessory_info.clone());
-    let enabled = existing.map(|item| item.enabled).unwrap_or(true);
+    let enabled = existing.map(|item| item.enabled).unwrap_or(false);
     let addresses = info
         .get_addresses()
         .iter()
