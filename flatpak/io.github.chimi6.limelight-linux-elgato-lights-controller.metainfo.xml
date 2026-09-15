@@ -2,15 +2,16 @@
 <component type="desktop-application">
   <id>io.github.chimi6.limelight-linux-elgato-lights-controller</id>
   <name>LimeLight</name>
-  <summary>Lightweight controller for Elgato Key Lights</summary>
+  <summary>Lightweight controller for Elgato lights</summary>
   <description>
     <p>
-      LimeLight is a lightweight Elgato Key Light controller for Linux. It discovers Key Lights on your LAN and lets you
-      control power, brightness, and color temperature without the bloat.
+      LimeLight is a lightweight controller for Elgato Key Light, Key Light Air, Key Light Mini, Ring Light and
+      Light Strip devices on Linux. It finds lights on your LAN and lets you control power, brightness and colour
+      temperature, individually, in groups, or all at once, without the bloat.
     </p>
     <p>
-      It runs a small local helper daemon that talks to the lights and exposes a localhost HTTP API so you can build your
-      own integrations (like an Open Deck plugin).
+      A small local daemon talks to the lights and exposes a localhost HTTP API so you can build your own
+      integrations (scripts, stream decks, Open Deck).
     </p>
   </description>
   <screenshots>
@@ -46,6 +47,16 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-09-14">
+      <description>
+        <p>Per-light settings (name, power-on behaviour, fade durations, identify). Lights switch together instead of one after another. Offline lights stay visible and come back on their own. Renames and IP changes are tracked automatically. Start-on-login fixed. Much smaller daemon.</p>
+      </description>
+    </release>
+    <release version="0.1.5" date="2026-02-22">
+      <description>
+        <p>Slint GUI (LimeLight) replaces tray app; taskbar icon fix, manage lights/groups, settings, autostart.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-02-05">
       <description>
         <p>Flathub metadata polish (screenshots + VCS URL).</p>

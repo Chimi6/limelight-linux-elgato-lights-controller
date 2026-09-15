@@ -1,0 +1,115 @@
+# Release pipeline: push a tag `vX.Y.Z` (matching helper/Cargo.toml) and this
+# builds the AppImage, the Flatpak bundle and a plain tarball, then publishes a
+# GitHub Release whose notes are the matching section of CHANGELOG.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  APP_ID: io.github.chimi6.limelight-linux-elgato-lights-controller
+
+jobs:
+  check-version:
+    name: Tag matches Cargo version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO=$(grep -m1 '^version' helper/Cargo.toml | cut -d'"' -f2)
+          echo "tag=$TAG cargo=$CARGO"
+          [ "$TAG" = "$CARGO" ] || { echo "Tag v$TAG does not match workspace version $CARGO"; exit 1; }
+          grep -q "^## \[$TAG\]" CHANGELOG.md || { echo "CHANGELOG.md has no '## [$TAG]' section"; exit 1; }
+
+  binaries:
+    name: AppImage + tarball (x86_64)
+    needs: check-version
+    runs-on: ubuntu-latest
+    # Old glibc on purpose: an AppImage built here runs on anything newer.
+    container: ubuntu:22.04
+    steps:
+      - name: System packages
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates git file pkg-config \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev desktop-file-utils
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: |
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build
+        working-directory: helper
+        run: cargo build --release --locked -p keylightd -p keylight-gui
+      - name: AppImage
+        run: bash packaging/appimage.sh
+      - name: Tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIR="LimeLight-$VERSION-x86_64"
+          mkdir -p "$DIR"
+          cp helper/target/release/keylight-gui "$DIR/limelight"
+          cp helper/target/release/keylightd "$DIR/keylightd"
+          cp "flatpak/$APP_ID.desktop" "flatpak/$APP_ID.metainfo.xml" "$DIR/"
+          cp public/Limecon-512.png "$DIR/$APP_ID.png"
+          cp README.md LICENSE CHANGELOG.md "$DIR/"
+          tar czf "$DIR.tar.gz" "$DIR"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            LimeLight-x86_64.AppImage
+            LimeLight-*-x86_64.tar.gz
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    needs: check-version
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: LimeLight.flatpak
+          manifest-path: flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.local.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: true
+
+  release:
+    name: Publish GitHub Release
+    needs: [binaries, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Collect files
+        run: |
+          mkdir -p out
+          find dist -type f \( -name '*.AppImage' -o -name '*.tar.gz' -o -name '*.flatpak' \) -exec cp {} out/ \;
+          ls -la out
+      - name: Release notes from CHANGELOG.md
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '/^## \[/{p = index($0, "[" ver "]") > 0; next} p' CHANGELOG.md > notes.md
+          printf '\n**Install**\n- Flatpak: `flatpak install --user LimeLight.flatpak`\n- AppImage: `chmod +x LimeLight-x86_64.AppImage && ./LimeLight-x86_64.AppImage`\n' >> notes.md
+          cat notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: LimeLight ${{ github.ref_name }}
+          body_path: notes.md
+          files: out/*
+          fail_on_unmatched_files: true

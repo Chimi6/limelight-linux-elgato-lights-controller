@@ -9,6 +9,8 @@ export struct LightData {
     warmth: float,
     power-on: bool,
     is-all: bool,
+    reachable: bool,
+    color-capable: bool,
 }
 
 export struct GroupData {
@@ -16,6 +18,8 @@ export struct GroupData {
     brightness: float,
     warmth: float,
     power-on: bool,
+    reachable: bool,
+    member-count: int,
 }
 
 export struct ManageLightEntry {
@@ -30,6 +34,24 @@ export struct GroupLightPick {
     id: string,
     name: string,
     selected: bool,
+}
+
+export struct LightSettingsData {
+    id: string,
+    name: string,
+    original-name: string,
+    product: string,
+    firmware: string,
+    serial: string,
+    address: string,
+    restore-last: bool,
+    default-brightness: float,
+    default-warmth: float,
+    switch-on-ms: int,
+    switch-off-ms: int,
+    color-change-ms: int,
+    loaded: bool,
+    status: string,
 }
 
 // ---- Design tokens ----
@@ -91,7 +113,6 @@ component TabButton {
                     font-size: 14px;
                     font-weight: 600;
                     color: root.selected ? Tokens.tab-text-selected : Tokens.tab-text-unselected;
-                    font-family: "Segoe UI";
                 }
             }
         }
@@ -102,10 +123,12 @@ component TabButton {
 component GelSlider {
     in-out property <float> value: 0.5;
     in property <bool> is-warmth: false;
+    in property <bool> enabled: true;
     callback changed(float);
     callback released(float);
 
     height: 16px;
+    opacity: root.enabled ? 1.0 : 0.45;
 
     groove := Rectangle {
         y: 2px;
@@ -156,6 +179,7 @@ component GelSlider {
     }
 
     touch := TouchArea {
+        enabled: root.enabled;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
@@ -209,10 +233,9 @@ component HeaderBar {
             height: 48px;
             padding: 0px;
             spacing: 0px;
-            alignment: center;
+            alignment: stretch;
 
             drag_header := TouchArea {
-                width: parent.width - 60px;
                 height: 48px;
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
@@ -282,7 +305,6 @@ component HeaderBar {
                                 font-size: 18px;
                                 font-weight: 700;
                                 color: #2E3A4A;
-                                font-family: "Segoe UI";
                             }
                         }
                     }
@@ -305,7 +327,6 @@ component HeaderBar {
                         Text {
                             text: "−";
                             font-size: 18px;
-                            font-family: "Segoe UI";
                             color: #000000;
                             vertical-alignment: center;
                         }
@@ -325,7 +346,6 @@ component HeaderBar {
                         Text {
                             text: "×";
                             font-size: 18px;
-                            font-family: "Segoe UI";
                             color: #000000;
                             vertical-alignment: center;
                         }
@@ -343,20 +363,66 @@ component HeaderBar {
     }
 }
 
+// ---- Toggle switch (settings rows) ----
+component ToggleSwitch {
+    in property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 44px;
+    height: 24px;
+
+    TouchArea {
+        clicked => { root.toggled(!root.checked); }
+        Rectangle {
+            width: 44px;
+            height: 24px;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: root.checked ? rgba(76, 175, 99, 0.70) : rgba(140, 150, 165, 0.50);
+            background: root.checked
+                ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                : @linear-gradient(180deg, #E8E8E8 0%, #CCCCCC 100%);
+            clip: true;
+
+            Rectangle {
+                y: 0px;
+                height: parent.height * 0.40;
+                background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
+            }
+            Rectangle {
+                x: root.checked ? parent.width - self.width - 3px : 3px;
+                y: (parent.height - self.height) / 2;
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                background: @linear-gradient(180deg, #FFFFFF 0%, #F0F0F0 100%);
+                drop-shadow-blur: 3px;
+                drop-shadow-color: rgba(0, 0, 0, 0.20);
+                drop-shadow-offset-y: 1px;
+                animate x { duration: 120ms; easing: ease-out; }
+            }
+        }
+    }
+}
+
 // ---- Light card (one per discovered light) ----
 component LightCard {
     in property <string> name: "Key Light";
     in-out property <float> brightness: 0.5;
     in-out property <float> warmth: 0.5;
     in-out property <bool> power-on: true;
+    in property <bool> reachable: true;
+    in property <bool> show-settings: false;
     callback brightness-changed(float);
     callback warmth-changed(float);
     callback power-toggled();
     callback slider-released();
+    callback settings-requested();
 
     Rectangle {
         border-radius: 12px;
         clip: true;
+        opacity: root.reachable ? 1.0 : 0.62;
         background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
         drop-shadow-blur: 12px;
         drop-shadow-color: rgba(0, 0, 0, 0.15);
@@ -429,24 +495,326 @@ component LightCard {
                     font-size: 15px;
                     font-weight: 700;
                     color: #2F3B4A;
-                    font-family: "Segoe UI";
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                     overflow: elide;
+                }
+                if !root.reachable: Text {
+                    text: "offline";
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: #B0552A;
+                    vertical-alignment: center;
+                }
+                if root.show-settings: gear-touch := TouchArea {
+                    width: 24px;
+                    height: 24px;
+                    clicked => { root.settings-requested(); }
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: gear-touch.has-hover ? rgba(44, 94, 143, 0.14) : transparent;
+                        Text {
+                            text: "⚙";
+                            font-size: 19px;
+                            color: gear-touch.has-hover ? #2C5E8F : #6A7A8A;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
 
             GelSlider {
                 value <=> root.brightness;
                 is-warmth: false;
+                enabled: root.reachable;
                 changed(v) => { root.brightness-changed(v); }
                 released(v) => { root.slider-released(); }
             }
             GelSlider {
                 value <=> root.warmth;
                 is-warmth: true;
+                enabled: root.reachable;
                 changed(v) => { root.warmth-changed(v); }
                 released(v) => { root.slider-released(); }
+            }
+        }
+    }
+}
+
+// ---- Small pill button used in panels ----
+component PillButton {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> selected: false;
+    callback clicked();
+    width: 84px;
+    height: 28px;
+    pill-touch := TouchArea {
+        clicked => { root.clicked(); }
+        Rectangle {
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: (root.primary || root.selected)
+                ? rgba(76, 175, 99, 0.50)
+                : (pill-touch.has-hover ? rgba(44, 94, 143, 0.40) : rgba(44, 94, 143, 0.25));
+            background: (root.primary || root.selected)
+                ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                : (pill-touch.has-hover
+                    ? @linear-gradient(180deg, #FFFFFF 0%, #EAF4FF 50%, #D4E6FA 100%)
+                    : @linear-gradient(180deg, #F3F9FF 0%, #E2F0FF 50%, #C9E0F8 100%));
+            clip: true;
+            Rectangle {
+                y: 0px;
+                height: parent.height * 0.45;
+                background: @linear-gradient(180deg, rgba(255, 255, 255, 0.50) 0%, transparent 100%);
+            }
+            Text {
+                text: root.label;
+                font-size: 12px;
+                font-weight: 600;
+                color: (root.primary || root.selected) ? #2E6B3A : #2C5E8F;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ---- Numeric field (milliseconds) ----
+component MsField {
+    in-out property <int> value: 0;
+    callback changed(int);
+    width: 64px;
+    height: 26px;
+    Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: rgba(140, 150, 165, 0.40);
+        background: #FFFFFF;
+        clip: true;
+        ms-input := TextInput {
+            text: root.value;
+            input-type: number;
+            font-size: 12px;
+            color: #2F3B4A;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            x: 6px;
+            width: parent.width - 12px;
+            edited => { root.changed(Math.max(0, Math.min(5000, Math.round(self.text.to-float())))); }
+        }
+    }
+}
+
+// ---- Per-light settings panel ----
+component LightSettingsPanel {
+    in-out property <LightSettingsData> data;
+    callback close();
+    callback save();
+    callback identify();
+
+    Rectangle {
+        border-radius: 12px;
+        clip: true;
+        background: @linear-gradient(180deg, #F6FAFF 0%, #E8F1FB 50%, #D6E3F2 100%);
+        drop-shadow-blur: 12px;
+        drop-shadow-color: rgba(0, 0, 0, 0.15);
+        drop-shadow-offset-y: 2px;
+
+        Rectangle { y: 0px; height: 1px; background: rgba(255, 255, 255, 0.60); }
+        Rectangle { y: parent.height - 1px; height: 1px; background: rgba(0, 0, 0, 0.12); }
+
+        VerticalBox {
+            padding: 10px;
+            spacing: 8px;
+
+            // Header
+            HorizontalBox {
+                spacing: 8px;
+                padding: 0px;
+                Text {
+                    text: "Light Settings";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #2F3B4A;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                close-touch := TouchArea {
+                    width: 28px;
+                    height: 28px;
+                    clicked => { root.close(); }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: close-touch.has-hover ? rgba(140, 150, 165, 0.50) : rgba(140, 150, 165, 0.25);
+                        background: close-touch.has-hover
+                            ? @linear-gradient(180deg, #FFFFFF 0%, #E8ECF0 100%)
+                            : @linear-gradient(180deg, #F0F4FA 0%, #D8E0EA 100%);
+                        Text {
+                            text: "×";
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: #555;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+            if !root.data.loaded: Text {
+                text: root.data.status;
+                font-size: 12px;
+                color: #8899AA;
+                horizontal-alignment: center;
+            }
+
+            if root.data.loaded: VerticalBox {
+                padding: 0px;
+                spacing: 8px;
+
+                // Device name + identify
+                Text {
+                    text: "Device name";
+                    font-size: 12px;
+                    color: #5A6878;
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Rectangle {
+                        height: 30px;
+                        horizontal-stretch: 1;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: rgba(140, 150, 165, 0.40);
+                        background: #FFFFFF;
+                        clip: true;
+                        name-input := TextInput {
+                            text: root.data.name;
+                            font-size: 13px;
+                            color: #2F3B4A;
+                            vertical-alignment: center;
+                            x: 6px;
+                            width: parent.width - 12px;
+                            edited => { root.data.name = self.text; }
+                        }
+                    }
+                    PillButton {
+                        label: "Identify";
+                        clicked => { root.identify(); }
+                    }
+                }
+                Text {
+                    text: root.data.product + " · firmware " + root.data.firmware + " · " + root.data.address;
+                    font-size: 11px;
+                    color: #6A7A8A;
+                    wrap: word-wrap;
+                }
+
+                Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                // Power-on behaviour
+                Text {
+                    text: "When powered on";
+                    font-size: 12px;
+                    color: #5A6878;
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    PillButton {
+                        label: "Restore last";
+                        width: 100px;
+                        selected: root.data.restore-last;
+                        clicked => { root.data.restore-last = true; }
+                    }
+                    PillButton {
+                        label: "Use defaults";
+                        width: 100px;
+                        selected: !root.data.restore-last;
+                        clicked => { root.data.restore-last = false; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text {
+                    text: "Default brightness";
+                    font-size: 12px;
+                    color: root.data.restore-last ? #A0AAB4 : #5A6878;
+                }
+                GelSlider {
+                    value: root.data.default-brightness;
+                    is-warmth: false;
+                    enabled: !root.data.restore-last;
+                    changed(v) => { root.data.default-brightness = v; }
+                }
+                Text {
+                    text: "Default temperature";
+                    font-size: 12px;
+                    color: root.data.restore-last ? #A0AAB4 : #5A6878;
+                }
+                GelSlider {
+                    value: root.data.default-warmth;
+                    is-warmth: true;
+                    enabled: !root.data.restore-last;
+                    changed(v) => { root.data.default-warmth = v; }
+                }
+
+                Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                // Fades
+                Text {
+                    text: "Transitions (milliseconds, 0 = instant)";
+                    font-size: 12px;
+                    color: #5A6878;
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Text { text: "Switch on"; font-size: 12px; color: #2F3B4A; vertical-alignment: center; horizontal-stretch: 1; }
+                    MsField { value: root.data.switch-on-ms; changed(v) => { root.data.switch-on-ms = v; } }
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Text { text: "Switch off"; font-size: 12px; color: #2F3B4A; vertical-alignment: center; horizontal-stretch: 1; }
+                    MsField { value: root.data.switch-off-ms; changed(v) => { root.data.switch-off-ms = v; } }
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Text { text: "Colour change"; font-size: 12px; color: #2F3B4A; vertical-alignment: center; horizontal-stretch: 1; }
+                    MsField { value: root.data.color-change-ms; changed(v) => { root.data.color-change-ms = v; } }
+                }
+
+                Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    Text {
+                        text: root.data.status;
+                        font-size: 11px;
+                        color: #6A7A8A;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    PillButton {
+                        label: "Save";
+                        primary: true;
+                        clicked => { root.save(); }
+                    }
+                }
             }
         }
     }
@@ -486,11 +854,9 @@ component ManageLightRow {
             name-input := TextInput {
                 text: root.name;
                 font-size: 13px;
-                font-family: "Segoe UI";
                 color: #2F3B4A;
                 vertical-alignment: center;
                 accepted => { root.rename(self.text); }
-                edited => { root.rename(self.text); }
             }
         }
 
@@ -584,7 +950,6 @@ component ManagePanel {
                     font-size: 15px;
                     font-weight: 700;
                     color: #2F3B4A;
-                    font-family: "Segoe UI";
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
@@ -620,7 +985,6 @@ component ManagePanel {
                             text: root.scanning ? "Scanning…" : "Scan";
                             font-size: 12px;
                             font-weight: 600;
-                            font-family: "Segoe UI";
                             color: root.scanning ? #2E6B3A : #2C5E8F;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -710,7 +1074,6 @@ component ManageGroupsPanel {
                     font-size: 15px;
                     font-weight: 700;
                     color: #2F3B4A;
-                    font-family: "Segoe UI";
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
@@ -748,7 +1111,6 @@ component ManageGroupsPanel {
                 font-size: 13px;
                 font-weight: 600;
                 color: #2F3B4A;
-                font-family: "Segoe UI";
             }
 
             Rectangle {
@@ -760,7 +1122,6 @@ component ManageGroupsPanel {
                 clip: true;
                 group-name-input := TextInput {
                     font-size: 13px;
-                    font-family: "Segoe UI";
                     color: #2F3B4A;
                     vertical-alignment: center;
                     x: 6px;
@@ -772,7 +1133,6 @@ component ManageGroupsPanel {
                 text: "Select Lights:";
                 font-size: 12px;
                 color: #5A6878;
-                font-family: "Segoe UI";
             }
 
             for light[idx] in root.available-lights: HorizontalBox {
@@ -816,7 +1176,6 @@ component ManageGroupsPanel {
                         x: 0px;
                         text: light.name;
                         font-size: 13px;
-                        font-family: "Segoe UI";
                         color: #2F3B4A;
                         vertical-alignment: center;
                     }
@@ -854,7 +1213,6 @@ component ManageGroupsPanel {
                         text: "Save Group";
                         font-size: 13px;
                         font-weight: 600;
-                        font-family: "Segoe UI";
                         color: #2E6B3A;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -873,7 +1231,6 @@ component ManageGroupsPanel {
                 font-size: 13px;
                 font-weight: 600;
                 color: #2F3B4A;
-                font-family: "Segoe UI";
             }
 
             for group[idx] in root.existing-groups: HorizontalBox {
@@ -889,7 +1246,6 @@ component ManageGroupsPanel {
                         x: 0px;
                         text: group.name;
                         font-size: 13px;
-                        font-family: "Segoe UI";
                         color: #2F3B4A;
                         vertical-alignment: center;
                     }
@@ -977,9 +1333,25 @@ export component MainWindow inherits Window {
     callback group-manage-delete(int);
     callback group-manage-close();
 
+    // Per-light settings panel
+    callback light-settings-requested(int);
+    callback light-settings-save();
+    callback light-settings-identify();
+    callback light-settings-close();
+    in-out property <bool> light-settings-open: false;
+    in-out property <LightSettingsData> light-settings;
+
     // Settings
     callback autostart-toggled(bool);
+    callback auto-enable-toggled(bool);
     in-out property <bool> autostart-enabled: false;
+    in-out property <bool> auto-enable-discovered: true;
+    in-out property <string> app-version: "";
+    in-out property <string> daemon-status: "";
+    in-out property <bool> daemon-online: false;
+
+    // Fired from the updater thread when results are waiting to be applied.
+    callback update-results-ready();
 
     reset-drag-state => {
         root.header-reset-key = 1 - root.header-reset-key;
@@ -1129,7 +1501,6 @@ export component MainWindow inherits Window {
                                     text: "+";
                                     font-size: 18px;
                                     font-weight: 700;
-                                    font-family: "Segoe UI";
                                     color: #2C5E8F;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1188,15 +1559,28 @@ export component MainWindow inherits Window {
                                 delete-entry(idx) => { root.manage-delete(idx); }
                             }
 
+                            if root.light-settings-open: LightSettingsPanel {
+                                data <=> root.light-settings;
+                                close => {
+                                    root.light-settings-open = false;
+                                    root.light-settings-close();
+                                }
+                                save => { root.light-settings-save(); }
+                                identify => { root.light-settings-identify(); }
+                            }
+
                             for light[idx] in root.lights-model: LightCard {
                                 name: light.name;
                                 brightness: light.brightness;
                                 warmth: light.warmth;
                                 power-on: light.power-on;
+                                reachable: light.reachable;
+                                show-settings: !light.is-all && light.reachable;
                                 brightness-changed(v) => { root.light-brightness-changed(idx, v); }
                                 warmth-changed(v) => { root.light-warmth-changed(idx, v); }
                                 power-toggled() => { root.light-power-toggled(idx); }
                                 slider-released() => { root.light-slider-released(idx); }
+                                settings-requested() => { root.light-settings-requested(idx); }
                             }
                         }
                     }
@@ -1228,6 +1612,7 @@ export component MainWindow inherits Window {
                                 brightness: group.brightness;
                                 warmth: group.warmth;
                                 power-on: group.power-on;
+                                reachable: group.reachable;
                                 brightness-changed(v) => { root.group-brightness-changed(idx, v); }
                                 warmth-changed(v) => { root.group-warmth-changed(idx, v); }
                                 power-toggled() => { root.group-power-toggled(idx); }
@@ -1268,7 +1653,6 @@ export component MainWindow inherits Window {
                                         font-size: 15px;
                                         font-weight: 700;
                                         color: #2F3B4A;
-                                        font-family: "Segoe UI";
                                     }
 
                                     Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
@@ -1285,54 +1669,47 @@ export component MainWindow inherits Window {
                                                 font-size: 13px;
                                                 font-weight: 600;
                                                 color: #2F3B4A;
-                                                font-family: "Segoe UI";
                                             }
                                             Text {
                                                 text: "Launch LimeLight automatically when you log in";
                                                 font-size: 11px;
                                                 color: #6A7A8A;
-                                                font-family: "Segoe UI";
                                                 wrap: word-wrap;
                                             }
                                         }
 
-                                        // Toggle switch
-                                        autostart-touch := TouchArea {
-                                            width: 44px;
-                                            height: 24px;
-                                            clicked => { root.autostart-toggled(!root.autostart-enabled); }
-                                            Rectangle {
-                                                width: 44px;
-                                                height: 24px;
-                                                border-radius: 12px;
-                                                border-width: 1px;
-                                                border-color: root.autostart-enabled
-                                                    ? rgba(76, 175, 99, 0.70)
-                                                    : rgba(140, 150, 165, 0.50);
-                                                background: root.autostart-enabled
-                                                    ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
-                                                    : @linear-gradient(180deg, #E8E8E8 0%, #CCCCCC 100%);
-                                                clip: true;
+                                        ToggleSwitch {
+                                            checked: root.autostart-enabled;
+                                            toggled(v) => { root.autostart-toggled(v); }
+                                        }
+                                    }
 
-                                                Rectangle {
-                                                    y: 0px;
-                                                    height: parent.height * 0.40;
-                                                    background: @linear-gradient(180deg, rgba(255, 255, 255, 0.40) 0%, transparent 100%);
-                                                }
+                                    Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
 
-                                                // Thumb
-                                                Rectangle {
-                                                    x: root.autostart-enabled ? parent.width - self.width - 3px : 3px;
-                                                    y: (parent.height - self.height) / 2;
-                                                    width: 18px;
-                                                    height: 18px;
-                                                    border-radius: 9px;
-                                                    background: @linear-gradient(180deg, #FFFFFF 0%, #F0F0F0 100%);
-                                                    drop-shadow-blur: 3px;
-                                                    drop-shadow-color: rgba(0, 0, 0, 0.20);
-                                                    drop-shadow-offset-y: 1px;
-                                                }
+                                    // Auto-enable discovered lights
+                                    HorizontalBox {
+                                        spacing: 10px;
+
+                                        VerticalBox {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            Text {
+                                                text: "Show new lights automatically";
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: #2F3B4A;
                                             }
+                                            Text {
+                                                text: "Lights found on the network appear in the Lights tab right away. Turn off to enable them by hand in Manage Lights.";
+                                                font-size: 11px;
+                                                color: #6A7A8A;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        ToggleSwitch {
+                                            checked: root.auto-enable-discovered;
+                                            toggled(v) => { root.auto-enable-toggled(v); }
                                         }
                                     }
 
@@ -1344,20 +1721,35 @@ export component MainWindow inherits Window {
                                         font-size: 13px;
                                         font-weight: 600;
                                         color: #2F3B4A;
-                                        font-family: "Segoe UI";
                                     }
                                     Text {
-                                        text: "LimeLight v0.1.0";
+                                        text: "LimeLight v" + root.app-version;
                                         font-size: 13px;
                                         font-weight: 600;
                                         color: #4A5A6A;
-                                        font-family: "Segoe UI";
                                     }
                                     Text {
-                                        text: "Elgato Key Light Controller for Linux";
+                                        text: "Elgato light controller for Linux";
                                         font-size: 12px;
                                         color: #6A7A8A;
-                                        font-family: "Segoe UI";
+                                    }
+                                    HorizontalBox {
+                                        spacing: 6px;
+                                        padding: 0px;
+                                        Rectangle {
+                                            width: 8px;
+                                            height: 8px;
+                                            y: (parent.height - 8px) / 2;
+                                            border-radius: 4px;
+                                            background: root.daemon-online ? #4CAF63 : #E8943A;
+                                        }
+                                        Text {
+                                            text: root.daemon-status;
+                                            font-size: 11px;
+                                            color: #6A7A8A;
+                                            wrap: word-wrap;
+                                            horizontal-stretch: 1;
+                                        }
                                     }
                                 }
                             }
