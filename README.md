@@ -53,7 +53,7 @@ Config lives in `~/.config/limelight-keylight/config.json`.
 
 ## Flathub
 
-They didn't like this application, but the flatpak and AppImage are available in the Releases tab.
+They didn't like this application :( (Minimal Submission), but the flatpak and AppImage are available in the Releases tab.
 
 ## Open Deck Plugin Link
 
