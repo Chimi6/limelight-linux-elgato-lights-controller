@@ -4,8 +4,14 @@ All notable changes to LimeLight. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-15
+
 ### Added
-- Presets: save a light's current look with the + chip, apply it from any light, group or All Lights card with one tap; the active preset is highlighted. Manage (rename, reorder, delete) in Settings. Stored by the daemon (`/v1/presets`) so the OpenDeck plugin can share them.
+- Presets: save a look from any light, group or All Lights card, apply it with one tap, and see which preset each light is on. Add, edit, rename, reorder and delete presets in Settings. Presets are stored by the daemon so the OpenDeck plugin can share them.
+- OpenDeck plugin link in the README and app metadata.
+
+### Fixed
+- Dragging a brightness or temperature slider no longer scrolls the page.
 
 ## [0.2.0] - 2026-09-14
 
@@ -38,7 +44,8 @@ All notable changes to LimeLight. Format follows [Keep a Changelog](https://keep
 ## [0.1.4] - 2026-02-05
 - Flathub metadata polish (screenshots, VCS URL).
 
-[Unreleased]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/releases/tag/v0.1.4
