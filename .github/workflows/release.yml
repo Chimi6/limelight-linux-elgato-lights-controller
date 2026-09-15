@@ -90,10 +90,15 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [binaries, flatpak]
+    # Publish as long as the AppImage/tarball built; a Flatpak failure only
+    # means that file is missing from the release (re-run that job and
+    # attach it by hand, or fix and re-tag).
+    if: always() && needs.binaries.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: dist
       - name: Collect files
