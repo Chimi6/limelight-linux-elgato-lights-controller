@@ -1144,28 +1144,24 @@ fn main() -> Result<(), slint::PlatformError> {
                         ctx.request_snapshot();
                     }
                 }
-                WindowEvent::CursorMoved { .. } => {
-                    if *drag_in_progress.borrow() {
-                        *drag_in_progress.borrow_mut() = false;
-                        *cursor_left_during_drag.borrow_mut() = false;
-                        if let Some(ui) = ctx.ui() {
-                            ui.invoke_reset_drag_state();
-                        }
+                WindowEvent::CursorMoved { .. } if *drag_in_progress.borrow() => {
+                    *drag_in_progress.borrow_mut() = false;
+                    *cursor_left_during_drag.borrow_mut() = false;
+                    if let Some(ui) = ctx.ui() {
+                        ui.invoke_reset_drag_state();
                     }
                 }
-                WindowEvent::CursorEntered { .. } => {
-                    if *drag_in_progress.borrow() && *cursor_left_during_drag.borrow() {
-                        *drag_in_progress.borrow_mut() = false;
-                        *cursor_left_during_drag.borrow_mut() = false;
-                        if let Some(ui) = ctx.ui() {
-                            ui.invoke_reset_drag_state();
-                        }
+                WindowEvent::CursorEntered { .. }
+                    if *drag_in_progress.borrow() && *cursor_left_during_drag.borrow() =>
+                {
+                    *drag_in_progress.borrow_mut() = false;
+                    *cursor_left_during_drag.borrow_mut() = false;
+                    if let Some(ui) = ctx.ui() {
+                        ui.invoke_reset_drag_state();
                     }
                 }
-                WindowEvent::CursorLeft { .. } => {
-                    if *drag_in_progress.borrow() {
-                        *cursor_left_during_drag.borrow_mut() = true;
-                    }
+                WindowEvent::CursorLeft { .. } if *drag_in_progress.borrow() => {
+                    *cursor_left_during_drag.borrow_mut() = true;
                 }
                 _ => {}
             }
