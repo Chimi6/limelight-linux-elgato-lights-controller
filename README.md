@@ -14,7 +14,7 @@ Supported devices: Key Light, Key Light Air, Key Light Mini, Ring Light, Light S
 - **`limelight`** — the desktop window. It talks only to the daemon, starts it if needed, and restarts it after an upgrade.
 - **`limelight-core`** — shared models and the Elgato device client.
 
-The daemon is independent on purpose so scripts and stream-deck style tools (an Open Deck plugin is planned) can drive the lights without the window.
+The daemon is independent on purpose so scripts and stream-deck style tools (see the [OpenDeck plugin](https://github.com/Chimi6/limelight-opendeck-plugin)) can drive the lights without the window.
 
 Memory footprint is a design goal: the daemon idles at a few megabytes and every light request is fanned out in parallel, so "all off" is one round trip.
 
@@ -57,7 +57,7 @@ They didn't like this application :( (Minimal Submission), but the flatpak and A
 
 ## Open Deck Plugin Link
 
-Coming soon.
+Control your lights from a Stream Deck on Linux with the OpenDeck plugin: **[limelight-opendeck-plugin](https://github.com/Chimi6/limelight-opendeck-plugin)**. It talks to the same `keylightd` daemon this app uses, so the window and the deck always agree.
 
 ## API
 
