@@ -139,11 +139,17 @@ component TabButton {
 
 // ---- Gel slider (static full-width gradient, thumb moves only) ----
 component GelSlider {
-    in-out property <float> value: 0.5;
+    // The value to display, owned by the caller (model-driven). The slider
+    // never writes to it: while pressed it shows its own drag value and
+    // reports changes through `changed`, so the caller's binding stays intact.
+    in property <float> value: 0.5;
     in property <bool> is-warmth: false;
     in property <bool> enabled: true;
     callback changed(float);
     callback released(float);
+
+    property <float> drag-value: 0;
+    property <float> shown: touch.pressed ? root.drag-value : root.value;
 
     height: 16px;
     opacity: root.enabled ? 1.0 : 0.45;
@@ -171,7 +177,7 @@ component GelSlider {
     }
 
     Rectangle {
-        x: Math.max(0px, (root.width - 16px) * root.value);
+        x: Math.max(0px, (root.width - 16px) * root.shown);
         y: 0px;
         width: 16px;
         height: 16px;
@@ -202,12 +208,12 @@ component GelSlider {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
                 DragState.slider-active = true;
-                root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
-                root.changed(root.value);
+                root.drag-value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
+                root.changed(root.drag-value);
             }
             if (event.kind == PointerEventKind.up) {
                 DragState.slider-active = false;
-                root.released(root.value);
+                root.released(root.drag-value);
             }
             if (event.kind == PointerEventKind.cancel) {
                 DragState.slider-active = false;
@@ -215,8 +221,8 @@ component GelSlider {
         }
         moved => {
             if (self.pressed) {
-                root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
-                root.changed(root.value);
+                root.drag-value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
+                root.changed(root.drag-value);
             }
         }
     }
@@ -506,9 +512,9 @@ component ToggleSwitch {
 // ---- Light card (one per discovered light) ----
 component LightCard {
     in property <string> name: "Key Light";
-    in-out property <float> brightness: 0.5;
-    in-out property <float> warmth: 0.5;
-    in-out property <bool> power-on: true;
+    in property <float> brightness: 0.5;
+    in property <float> warmth: 0.5;
+    in property <bool> power-on: true;
     in property <bool> reachable: true;
     in property <bool> show-settings: false;
     in property <[string]> presets;
@@ -629,14 +635,14 @@ component LightCard {
             }
 
             GelSlider {
-                value <=> root.brightness;
+                value: root.brightness;
                 is-warmth: false;
                 enabled: root.reachable;
                 changed(v) => { root.brightness-changed(v); }
                 released(v) => { root.slider-released(); }
             }
             GelSlider {
-                value <=> root.warmth;
+                value: root.warmth;
                 is-warmth: true;
                 enabled: root.reachable;
                 changed(v) => { root.warmth-changed(v); }

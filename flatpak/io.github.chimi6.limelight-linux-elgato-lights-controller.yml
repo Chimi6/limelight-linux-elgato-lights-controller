@@ -42,4 +42,4 @@ modules:
     sources:
       - type: git
         url: https://github.com/Chimi6/limelight-linux-elgato-lights-controller.git
-        tag: v0.3.0
+        tag: v0.3.1

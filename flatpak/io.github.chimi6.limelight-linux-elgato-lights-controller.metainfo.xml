@@ -48,6 +48,11 @@
   </provides>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.3.1" date="2026-09-15">
+      <description>
+        <p>All Lights and group sliders act as master controls. Preset highlights and sliders always reflect real light levels. The window restarts the daemon if it stops.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-15">
       <description>
         <p>Presets: save a look from any light or group, apply it with one tap, manage them in Settings. Slider drags no longer scroll the page. OpenDeck plugin link.</p>

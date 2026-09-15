@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "keylight-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs",
  "i-slint-backend-winit",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "keylightd"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "limelight-core",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "limelight-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

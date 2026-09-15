@@ -4,6 +4,16 @@ All notable changes to LimeLight. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-15
+
+### Changed
+- All Lights and group sliders are now master controls: they stay where you set them, move every member when dragged, and their preset chip lights only when every member is on that preset. Individual light cards always show the light's real level.
+
+### Fixed
+- Preset highlights stayed lit after changing a light; they now clear the moment values change.
+- Sliders stopped following the app after the first drag; they now always reflect the current level, including changes from groups, All Lights, presets and other apps.
+- If the daemon stops or an old version is replaced, the window now restarts it and recovers instead of showing every light offline until relaunch. Daemon output is logged to `~/.local/state/limelight/keylightd.log`.
+
 ## [0.3.0] - 2026-09-15
 
 ### Added
@@ -44,7 +54,8 @@ All notable changes to LimeLight. Format follows [Keep a Changelog](https://keep
 ## [0.1.4] - 2026-02-05
 - Flathub metadata polish (screenshots, VCS URL).
 
-[Unreleased]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/Chimi6/limelight-linux-elgato-lights-controller/compare/v0.1.4...v0.1.5
