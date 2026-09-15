@@ -6,12 +6,20 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Manual re-run for an existing tag (e.g. to rebuild one artifact and
+  # attach it to the release that already exists).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.2.0"
+        required: true
 
 permissions:
   contents: write
 
 env:
   APP_ID: io.github.chimi6.limelight-linux-elgato-lights-controller
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   check-version:
@@ -19,13 +27,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Compare
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           CARGO=$(grep -m1 '^version' helper/Cargo.toml | cut -d'"' -f2)
-          echo "tag=$TAG cargo=$CARGO"
-          [ "$TAG" = "$CARGO" ] || { echo "Tag v$TAG does not match workspace version $CARGO"; exit 1; }
-          grep -q "^## \[$TAG\]" CHANGELOG.md || { echo "CHANGELOG.md has no '## [$TAG]' section"; exit 1; }
+          echo "tag=$VERSION cargo=$CARGO"
+          [ "$VERSION" = "$CARGO" ] || { echo "Tag v$VERSION does not match workspace version $CARGO"; exit 1; }
+          grep -q "^## \[$VERSION\]" CHANGELOG.md || { echo "CHANGELOG.md has no '## [$VERSION]' section"; exit 1; }
 
   binaries:
     name: AppImage + tarball (x86_64)
@@ -43,6 +53,8 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libgl1-mesa-dev desktop-file-utils
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Rust toolchain
         run: |
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -54,7 +66,7 @@ jobs:
         run: bash packaging/appimage.sh
       - name: Tarball
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           DIR="LimeLight-$VERSION-x86_64"
           mkdir -p "$DIR"
           cp helper/target/release/keylight-gui "$DIR/limelight"
@@ -80,7 +92,11 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@v6
+        with:
+          ref: ${{ env.TAG }}
+      # The action lives in the flatpak org; the container images are still
+      # published under flathub-infra.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: LimeLight.flatpak
           manifest-path: flatpak/io.github.chimi6.limelight-linux-elgato-lights-controller.local.yml
@@ -97,6 +113,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -108,13 +126,14 @@ jobs:
           ls -la out
       - name: Release notes from CHANGELOG.md
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           awk -v ver="$VERSION" '/^## \[/{p = index($0, "[" ver "]") > 0; next} p' CHANGELOG.md > notes.md
           printf '\n**Install**\n- Flatpak: `flatpak install --user LimeLight.flatpak`\n- AppImage: `chmod +x LimeLight-x86_64.AppImage && ./LimeLight-x86_64.AppImage`\n' >> notes.md
           cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          name: LimeLight ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          name: LimeLight ${{ env.TAG }}
           body_path: notes.md
           files: out/*
           fail_on_unmatched_files: true
