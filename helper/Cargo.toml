@@ -1,7 +1,26 @@
 [workspace]
 members = [
+  "crates/limelight-core",
   "crates/keylightd",
-  "crates/keylight-tray",
   "crates/keylight-gui",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/Chimi6/limelight-linux-elgato-lights-controller"
+
+[workspace.dependencies]
+limelight-core = { path = "crates/limelight-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

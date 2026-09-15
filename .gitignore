@@ -19,3 +19,11 @@ repo/
 flatpak/build-dir/
 flatpak/repo/
 flatpak/.flatpak-builder/
+
+# Generated docs / scratch (never committed)
+TEMP/
+
+# Packaging outputs
+build-appimage/
+*.AppImage
+*.flatpak

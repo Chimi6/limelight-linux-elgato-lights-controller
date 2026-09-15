@@ -1,47 +1,67 @@
 # LimeLight
 
-Lightweight Elgato Key Light control for Linux.
+Lightweight Elgato light control for Linux.
 
-I recently started dual booting Linux (Bazzite/KDE) and there’s no official Elgato Key Light “Control Center” equivalent here. So far the only thing missing from mimicing my windows set up.
-Additonally… Control Center on Windows was a resource hog for me (and it loved to freeze), so I built my own.
+![LimeLight main window](public/screenshot-main.png)
 
-LimeLight is split into two parts:
+There is no Elgato Control Center for Linux, and the Windows one was a resource hog that liked to freeze. LimeLight is a small, fast replacement: discover your lights on the LAN, control power, brightness and colour temperature, individually, in groups, or all at once.
 
-- **`keylightd` (daemon)**: discovers lights on your LAN, persists them, and talks to the Elgato local API.
-- **`keylight-tray` (desktop UI)**: a small GUI that controls lights via the local daemon API.
+Supported devices: Key Light, Key Light Air, Key Light Mini, Ring Light, Light Strip / Light Strip Pro (every device that speaks the Elgato local API).
 
-## Features
+## How it is built
 
-- **mDNS discovery** of Key Lights (`_elg._tcp`)
-- **Power / brightness / color temperature**
-- **Groups** and **All Lights** control
-- **Aliases** (friendly names) + persistence
-- **Local HTTP API** so you can build third-party tools/plugins (Open Deck plugin coming)
+- **`keylightd`** — a daemon that discovers lights (mDNS, kept running in the background so IP changes and renames are picked up), remembers them, and exposes a **localhost-only HTTP API** (`http://127.0.0.1:9124`).
+- **`limelight`** — the desktop window. It talks only to the daemon, starts it if needed, and restarts it after an upgrade.
+- **`limelight-core`** — shared models and the Elgato device client.
 
-## Quickstart (dev)
+The daemon is independent on purpose so scripts and stream-deck style tools (an Open Deck plugin is planned) can drive the lights without the window.
 
-From the repo root:
+Memory footprint is a design goal: the daemon idles at a few megabytes and every light request is fanned out in parallel, so "all off" is one round trip.
+
+## Install
+
+Releases are published on the [Releases page](https://github.com/Chimi6/limelight-linux-elgato-lights-controller/releases) as a Flatpak bundle. An AppImage is planned.
+
+```bash
+flatpak install --user LimeLight.flatpak
+flatpak run io.github.chimi6.limelight-linux-elgato-lights-controller
+```
+
+## Build from source
+
+Requires a stable Rust toolchain.
 
 ```bash
 cd helper
-source "$HOME/.cargo/env"  # if cargo isn't on PATH
+cargo build --release -p keylightd -p keylight-gui
+./target/release/keylight-gui        # starts keylightd automatically
 ```
 
-Run the daemon:
+The daemon can also be run and used on its own:
 
 ```bash
-cargo run -p keylightd -- serve --port 9124
+./target/release/keylightd serve                 # API on 127.0.0.1:9124
+./target/release/keylightd discover              # one-off scan
+./target/release/keylightd list
+./target/release/keylightd set --all --on 0
+./target/release/keylightd identify "Left Light" # blink a light
 ```
 
-Run the UI (in a second terminal):
+`LIMELIGHT_PORT` overrides the port for both binaries.
 
-```bash
-cargo run -p keylight-tray
-```
+Config lives in `~/.config/limelight-keylight/config.json`.
+
+## Flathub
+
+They didn't like this application, but the flatpak and AppImage are available in the Releases tab.
+
+## Open Deck Plugin Link
+
+Coming soon.
 
 ## API
 
-See `docs/API.md`.
+See [`docs/API.md`](docs/API.md). Developer notes are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## License
 

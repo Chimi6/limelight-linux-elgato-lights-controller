@@ -1,24 +1,286 @@
 //! keylight-gui — LimeLight desktop GUI (Slint).
-//! Talks to keylightd HTTP API; see docs/API.md.
+//! Talks to keylightd over its localhost API; see docs/API.md.
 
 mod api;
+mod autostart;
+mod daemon;
+mod fetch;
 mod update_queue;
 
-use api::{
-    api_to_brightness, brightness_to_api, kelvin_to_warmth, warmth_to_kelvin, ApiClient,
-    LightRecord, UpdatePayload,
-};
+use api::ApiClient;
+use fetch::Fetcher;
 use i_slint_backend_winit::{EventResult, WinitWindowAccessor};
+use limelight_core::api::{Group, LightRecord, LightStateResponse, Settings, UpdateRequest};
+use limelight_core::convert::{
+    brightness_to_slider, kelvin_to_warmth, slider_to_brightness, warmth_to_kelvin,
+};
 use slint::{Model, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use api::GroupRecord;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use update_queue::{UpdateCommand, UpdateTarget};
 use winit::event::WindowEvent;
 
 slint::include_modules!();
 
-/// Load and set the window icon from the assets (taskbar/dock).
+/// Poll the daemon for light state this often while the window is focused.
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// After the user touched a control, ignore polled values for this long so
+/// a slow light does not snap the slider back.
+const USER_CHANGE_GRACE: Duration = Duration::from_millis(1500);
+
+/// Everything the UI thread needs to reconcile models. Lives in an `Rc`.
+struct Ctx {
+    ui: slint::Weak<MainWindow>,
+    fetcher: Fetcher,
+    cmd_tx: mpsc::Sender<UpdateCommand>,
+    states: RefCell<Vec<LightStateResponse>>,
+    groups: RefCell<Vec<Group>>,
+    dragging: Cell<bool>,
+    last_user_change: Cell<Instant>,
+    last_snapshot_request: Cell<Instant>,
+    window_focused: Cell<bool>,
+}
+
+impl Ctx {
+    fn ui(&self) -> Option<MainWindow> {
+        self.ui.upgrade()
+    }
+
+    fn touched(&self) {
+        self.last_user_change.set(Instant::now());
+    }
+
+    fn in_grace(&self) -> bool {
+        self.dragging.get() || self.last_user_change.get().elapsed() < USER_CHANGE_GRACE
+    }
+
+    /// Fetch states + groups and refresh both tabs. Debounced to 1/s.
+    fn request_snapshot(self: &Rc<Self>) {
+        if self.last_snapshot_request.get().elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_snapshot_request.set(Instant::now());
+        let ctx = Rc::clone(self);
+        self.fetcher.run(
+            |api| {
+                let states = api.get_states();
+                let groups = api.get_groups();
+                (states, groups)
+            },
+            move |(states, groups)| {
+                let online = states.is_ok();
+                if let Some(ui) = ctx.ui() {
+                    ui.set_daemon_online(online);
+                }
+                if let Ok(states) = states {
+                    *ctx.states.borrow_mut() = states;
+                }
+                if let Ok(groups) = groups {
+                    *ctx.groups.borrow_mut() = groups;
+                }
+                ctx.sync_models();
+            },
+        );
+    }
+
+    /// Force a snapshot regardless of the debounce (after management actions).
+    fn force_snapshot(self: &Rc<Self>) {
+        self.last_snapshot_request
+            .set(Instant::now() - Duration::from_secs(5));
+        self.request_snapshot();
+    }
+
+    /// Push `states`/`groups` into the Slint models, in place where possible.
+    fn sync_models(&self) {
+        if self.in_grace() {
+            return;
+        }
+        let Some(ui) = self.ui() else { return };
+        let states = self.states.borrow();
+        let groups = self.groups.borrow();
+
+        // ---- lights ----
+        let mut entries = vec![all_card(&states)];
+        for s in states.iter() {
+            entries.push(light_card(s));
+        }
+        let model = ui.get_lights_model();
+        let same_shape = model.row_count() == entries.len()
+            && entries
+                .iter()
+                .enumerate()
+                .all(|(i, e)| model.row_data(i).map(|d| d.id == e.id).unwrap_or(false));
+        if same_shape {
+            for (i, e) in entries.into_iter().enumerate() {
+                if model.row_data(i).map(|d| d != e).unwrap_or(true) {
+                    model.set_row_data(i, e);
+                }
+            }
+        } else {
+            ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(entries))));
+        }
+
+        // ---- groups ----
+        let entries: Vec<GroupData> = groups.iter().map(|g| group_card(g, &states)).collect();
+        let model = ui.get_groups_model();
+        let same_shape = model.row_count() == entries.len()
+            && entries
+                .iter()
+                .enumerate()
+                .all(|(i, e)| model.row_data(i).map(|d| d.name == e.name).unwrap_or(false));
+        if same_shape {
+            for (i, e) in entries.into_iter().enumerate() {
+                if model.row_data(i).map(|d| d != e).unwrap_or(true) {
+                    model.set_row_data(i, e);
+                }
+            }
+        } else {
+            ui.set_groups_model(ModelRc::from(Rc::new(VecModel::from(entries))));
+        }
+    }
+
+    /// Reflect a per-light update result: flip reachability on the card.
+    fn apply_update_result(
+        &self,
+        target: &UpdateTarget,
+        result: &Result<limelight_core::api::UpdateResponse, api::ApiError>,
+    ) {
+        let Some(ui) = self.ui() else { return };
+        let model = ui.get_lights_model();
+        match result {
+            Ok(resp) => {
+                let mut states = self.states.borrow_mut();
+                for r in &resp.results {
+                    if let Some(s) = states.iter_mut().find(|s| s.id == r.id) {
+                        s.reachable = r.ok;
+                        if let Some(new) = &r.state {
+                            s.on = new.on;
+                            s.brightness = new.brightness;
+                            s.kelvin = new.kelvin;
+                        }
+                    }
+                    for i in 1..model.row_count() {
+                        if let Some(mut d) = model.row_data(i) {
+                            if d.id.as_str() == r.id && d.reachable != r.ok {
+                                d.reachable = r.ok;
+                                model.set_row_data(i, d);
+                            }
+                        }
+                    }
+                }
+                ui.set_daemon_online(true);
+            }
+            Err(err) => {
+                eprintln!("update {:?} failed: {err}", target);
+                // Daemon-level failure (not per light): mark the target unreachable.
+                if let UpdateTarget::Light(id) = target {
+                    for i in 1..model.row_count() {
+                        if let Some(mut d) = model.row_data(i) {
+                            if d.id.as_str() == id {
+                                d.reachable = false;
+                                model.set_row_data(i, d);
+                            }
+                        }
+                    }
+                }
+                if err.0.contains("connect") || err.0.contains("refused") {
+                    ui.set_daemon_online(false);
+                }
+            }
+        }
+    }
+
+    fn send(&self, target: UpdateTarget, update: UpdateRequest) {
+        self.touched();
+        let _ = self.cmd_tx.send(UpdateCommand { target, update });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model builders
+// ---------------------------------------------------------------------------
+
+fn light_card(s: &LightStateResponse) -> LightData {
+    LightData {
+        id: SharedString::from(s.id.as_str()),
+        name: SharedString::from(s.display_name()),
+        brightness: brightness_to_slider(s.brightness),
+        warmth: kelvin_to_warmth(s.kelvin),
+        power_on: s.on,
+        is_all: false,
+        reachable: s.reachable,
+        color_capable: s.color_capable,
+    }
+}
+
+/// Average of the reachable lights; power = any on.
+fn aggregate(states: &[&LightStateResponse]) -> (f32, f32, bool, bool) {
+    let reachable: Vec<&&LightStateResponse> = states.iter().filter(|s| s.reachable).collect();
+    let any_on = states.iter().any(|s| s.on);
+    if reachable.is_empty() {
+        return (0.5, 0.5, any_on, false);
+    }
+    let n = reachable.len() as f32;
+    let b = reachable
+        .iter()
+        .map(|s| brightness_to_slider(s.brightness))
+        .sum::<f32>()
+        / n;
+    let w = reachable
+        .iter()
+        .map(|s| kelvin_to_warmth(s.kelvin))
+        .sum::<f32>()
+        / n;
+    (b, w, any_on, true)
+}
+
+fn all_card(states: &[LightStateResponse]) -> LightData {
+    let refs: Vec<&LightStateResponse> = states.iter().collect();
+    let (b, w, on, reachable) = aggregate(&refs);
+    LightData {
+        id: SharedString::from("__all__"),
+        name: SharedString::from("All Lights"),
+        brightness: b,
+        warmth: w,
+        power_on: on,
+        is_all: true,
+        reachable: reachable || states.is_empty(),
+        color_capable: false,
+    }
+}
+
+fn group_card(g: &Group, states: &[LightStateResponse]) -> GroupData {
+    let members: Vec<&LightStateResponse> = states
+        .iter()
+        .filter(|s| g.members.contains(&s.id))
+        .collect();
+    let (b, w, on, reachable) = aggregate(&members);
+    GroupData {
+        name: SharedString::from(g.name.as_str()),
+        brightness: b,
+        warmth: w,
+        power_on: on,
+        reachable,
+        member_count: members.len() as i32,
+    }
+}
+
+fn manage_entries(lights: &[LightRecord], states: &[LightStateResponse]) -> Vec<ManageLightEntry> {
+    lights
+        .iter()
+        .map(|rec| ManageLightEntry {
+            id: SharedString::from(rec.id.as_str()),
+            name: SharedString::from(rec.name.as_str()),
+            alias: SharedString::from(rec.alias.as_deref().unwrap_or("")),
+            enabled: rec.enabled,
+            reachable: states.iter().any(|s| s.id == rec.id && s.reachable),
+        })
+        .collect()
+}
+
 fn set_window_icon(ui: &MainWindow) {
     let icon_bytes = include_bytes!("../assets/Limecon-256.png");
     if let Ok(img) = image::load_from_memory(icon_bytes) {
@@ -32,137 +294,158 @@ fn set_window_icon(ui: &MainWindow) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
 fn main() -> Result<(), slint::PlatformError> {
-    ensure_daemon_running();
-
-    let api = ApiClient::new();
-    let fetch_api = api.clone();
-
-    // Fetch initial lights + states from keylightd (best-effort, blocking)
-    let lights = api.get_lights().unwrap_or_default();
-    let states = api.get_light_states().unwrap_or_default();
-    let groups = api.get_groups().unwrap_or_default();
-
-    // Spawn blocking update queue (moves api into background thread)
-    let cmd_tx = update_queue::spawn(api);
-
     let ui = MainWindow::new()?;
-    // Match KDE/Wayland taskbar grouping to the Flatpak desktop id.
-    // Slint platform is initialized after MainWindow::new(), but before ui.run().
-    let xdg_app_id = std::env::var("FLATPAK_ID")
-        .unwrap_or_else(|_| "io.github.chimi6.limelight-linux-elgato-lights-controller".into());
+    let xdg_app_id = std::env::var("FLATPAK_ID").unwrap_or_else(|_| autostart::APP_ID.into());
     if let Err(e) = slint::set_xdg_app_id(xdg_app_id.clone()) {
         eprintln!("set_xdg_app_id({xdg_app_id}) failed: {e}");
     }
     set_window_icon(&ui);
+    ui.set_app_version(SharedString::from(limelight_core::VERSION));
+    ui.set_daemon_status(SharedString::from("Connecting to daemon…"));
+    ui.set_daemon_online(false);
+    ui.set_autostart_enabled(autostart::enabled());
 
-    // Build lights model: ALL card first, then individual reachable lights
-    let lights_model = Rc::new(VecModel::<LightData>::default());
-    {
-        let any_on = states.iter().any(|s| s.on);
-        lights_model.push(LightData {
-            id: SharedString::from("__all__"),
-            name: SharedString::from("All Lights"),
-            brightness: 0.5,
-            warmth: 0.5,
-            power_on: any_on,
-            is_all: true,
-        });
+    // Empty models so the window paints immediately.
+    ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(vec![all_card(&[])]))));
+    ui.set_groups_model(ModelRc::from(Rc::new(VecModel::<GroupData>::default())));
 
-        for state in &states {
-            let record = lights.iter().find(|l| l.id == state.id);
-            let display_name = record
-                .and_then(|r| r.alias.as_deref())
-                .unwrap_or_else(|| record.map(|r| r.name.as_str()).unwrap_or("Unknown Light"));
-            lights_model.push(LightData {
-                id: SharedString::from(state.id.as_str()),
-                name: SharedString::from(display_name),
-                brightness: api_to_brightness(state.brightness),
-                warmth: kelvin_to_warmth(state.kelvin),
-                power_on: state.on,
-                is_all: false,
-            });
-        }
-    }
-    ui.set_lights_model(ModelRc::from(lights_model.clone()));
+    let api = ApiClient::new();
+    let fetcher = Fetcher::spawn(api.clone());
 
-    // Build initial groups model
-    rebuild_groups_model(&ui, &groups, &states);
-    drop(groups);
+    // Update results come back on the UI thread through this handler.
+    let ui_weak_for_results = ui.as_weak();
+    let (result_tx, result_rx) = mpsc::channel::<(
+        UpdateTarget,
+        Result<limelight_core::api::UpdateResponse, api::ApiError>,
+    )>();
+    let handler: update_queue::ResultHandler = Arc::new(move |target, result| {
+        let _ = result_tx.send((target, result));
+        let _ = ui_weak_for_results.upgrade_in_event_loop(|ui| ui.invoke_update_results_ready());
+    });
+    let cmd_tx = update_queue::spawn(api, handler);
 
-    // ---- Nav tab callbacks (sync power state on tab switch) ----
+    let ctx = Rc::new(Ctx {
+        ui: ui.as_weak(),
+        fetcher,
+        cmd_tx,
+        states: RefCell::new(Vec::new()),
+        groups: RefCell::new(Vec::new()),
+        dragging: Cell::new(false),
+        last_user_change: Cell::new(Instant::now() - Duration::from_secs(10)),
+        last_snapshot_request: Cell::new(Instant::now() - Duration::from_secs(10)),
+        window_focused: Cell::new(true),
+    });
 
-    ui.on_nav_lights({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+    // Drain update results (runs on the UI thread).
+    ui.on_update_results_ready({
+        let ctx = Rc::clone(&ctx);
+        let rx = Rc::new(result_rx);
         move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let states = api.get_light_states().unwrap_or_default();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    let model = ui.get_lights_model();
-                    for state in &states {
-                        for i in 1..model.row_count() {
-                            if let Some(mut d) = model.row_data(i) {
-                                if d.id.as_str() == state.id {
-                                    d.brightness = api_to_brightness(state.brightness);
-                                    d.warmth = kelvin_to_warmth(state.kelvin);
-                                    d.power_on = state.on;
-                                    model.set_row_data(i, d);
-                                    break;
-                                }
-                            }
+            while let Ok((target, result)) = rx.try_recv() {
+                ctx.apply_update_result(&target, &result);
+            }
+        }
+    });
+
+    // 1) Make sure the daemon is up (on the fetch thread, window already visible).
+    // 2) Load settings. 3) First snapshot.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.fetcher.run(
+            |api| {
+                let status = daemon::ensure_running();
+                let settings = api.get_settings();
+                (status, settings)
+            },
+            {
+                let ctx = Rc::clone(&ctx);
+                move |(status, settings): (
+                    daemon::DaemonStatus,
+                    Result<Settings, api::ApiError>,
+                )| {
+                    if let Some(ui) = ctx.ui() {
+                        ui.set_daemon_status(SharedString::from(status.text()));
+                        ui.set_daemon_online(!matches!(
+                            status,
+                            daemon::DaemonStatus::Unavailable(_)
+                        ));
+                        if let Ok(s) = settings {
+                            ui.set_auto_enable_discovered(s.auto_enable_discovered);
                         }
                     }
-                    // Sync ALL card power from updated individual states
-                    let any_on = (1..model.row_count()).any(|i| {
-                        model.row_data(i).map(|d| d.power_on).unwrap_or(false)
-                    });
-                    if let Some(mut all) = model.row_data(0) {
-                        all.power_on = any_on;
-                        model.set_row_data(0, all);
-                    }
-                })
-                .ok();
-            });
-        }
-    });
+                    ctx.force_snapshot();
+                }
+            },
+        );
+    }
 
-    ui.on_nav_groups({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+    // Periodic poll while focused (keeps up with Stream Deck / other controllers).
+    let poll_timer = slint::Timer::default();
+    poll_timer.start(slint::TimerMode::Repeated, POLL_INTERVAL, {
+        let ctx = Rc::clone(&ctx);
         move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let groups = api.get_groups().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    rebuild_groups_model(&ui, &groups, &states);
-                })
-                .ok();
-            });
+            if ctx.window_focused.get() {
+                ctx.request_snapshot();
+            }
         }
     });
 
-    ui.on_nav_settings(|| {});
+    // ---- Nav tabs ----
+    ui.on_nav_lights({
+        let ctx = Rc::clone(&ctx);
+        move || ctx.request_snapshot()
+    });
+    ui.on_nav_groups({
+        let ctx = Rc::clone(&ctx);
+        move || ctx.request_snapshot()
+    });
+    ui.on_nav_settings({
+        let ctx = Rc::clone(&ctx);
+        move || {
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                |api| (api.health(), api.get_settings()),
+                move |(health, settings)| {
+                    let Some(ui) = ctx2.ui() else { return };
+                    match health {
+                        Ok(h) => {
+                            ui.set_daemon_status(SharedString::from(format!(
+                                "Daemon running (v{}) · {} of {} lights reachable",
+                                h.version, h.reachable, h.enabled
+                            )));
+                            ui.set_daemon_online(true);
+                        }
+                        Err(e) => {
+                            ui.set_daemon_status(SharedString::from(format!(
+                                "Daemon unavailable: {e}"
+                            )));
+                            ui.set_daemon_online(false);
+                        }
+                    }
+                    if let Ok(s) = settings {
+                        ui.set_auto_enable_discovered(s.auto_enable_discovered);
+                    }
+                },
+            );
+        }
+    });
 
-    // ---- Light callbacks ----
-
+    // ---- Light cards ----
     ui.on_light_brightness_changed({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx, value| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
+            ctx.dragging.set(true);
             let model = ui.get_lights_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 data.brightness = value;
                 model.set_row_data(idx, data.clone());
-
                 if data.is_all {
                     for i in 1..model.row_count() {
                         if let Some(mut d) = model.row_data(i) {
@@ -170,32 +453,30 @@ fn main() -> Result<(), slint::PlatformError> {
                             model.set_row_data(i, d);
                         }
                     }
+                } else {
+                    refresh_all_card(&model);
                 }
-
-                let target = target_for(&data);
-                let _ = tx.send(UpdateCommand::SliderDrag {
-                    target,
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: Some(brightness_to_api(value)),
-                        kelvin: None,
+                ctx.send(
+                    target_for(&data),
+                    UpdateRequest {
+                        brightness: Some(slider_to_brightness(value)),
+                        ..Default::default()
                     },
-                });
+                );
             }
         }
     });
 
     ui.on_light_warmth_changed({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx, value| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
+            ctx.dragging.set(true);
             let model = ui.get_lights_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 data.warmth = value;
                 model.set_row_data(idx, data.clone());
-
                 if data.is_all {
                     for i in 1..model.row_count() {
                         if let Some(mut d) = model.row_data(i) {
@@ -203,33 +484,30 @@ fn main() -> Result<(), slint::PlatformError> {
                             model.set_row_data(i, d);
                         }
                     }
+                } else {
+                    refresh_all_card(&model);
                 }
-
-                let target = target_for(&data);
-                let _ = tx.send(UpdateCommand::SliderDrag {
-                    target,
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: None,
+                ctx.send(
+                    target_for(&data),
+                    UpdateRequest {
                         kelvin: Some(warmth_to_kelvin(value)),
+                        ..Default::default()
                     },
-                });
+                );
             }
         }
     });
 
     ui.on_light_power_toggled({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_lights_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 let new_power = !data.power_on;
                 data.power_on = new_power;
                 model.set_row_data(idx, data.clone());
-
                 if data.is_all {
                     for i in 1..model.row_count() {
                         if let Some(mut d) = model.row_data(i) {
@@ -238,126 +516,169 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                     }
                 } else {
-                    sync_all_card_power(&model);
+                    refresh_all_card(&model);
                 }
-
-                let target = target_for(&data);
-                let _ = tx.send(UpdateCommand::PowerToggle {
-                    target,
-                    on: new_power,
-                });
+                {
+                    let mut states = ctx.states.borrow_mut();
+                    for s in states.iter_mut() {
+                        if data.is_all || s.id == data.id.as_str() {
+                            s.on = new_power;
+                        }
+                    }
+                }
+                ctx.send(
+                    target_for(&data),
+                    UpdateRequest {
+                        on: Some(u8::from(new_power)),
+                        ..Default::default()
+                    },
+                );
             }
         }
     });
 
     ui.on_light_slider_released({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            ctx.dragging.set(false);
+            ctx.touched();
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_lights_model();
-            let idx = idx as usize;
-            if let Some(data) = model.row_data(idx) {
-                let target = target_for(&data);
-                let _ = tx.send(UpdateCommand::SliderRelease {
-                    target,
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: Some(brightness_to_api(data.brightness)),
+            if let Some(data) = model.row_data(idx as usize) {
+                // Final authoritative values for this target.
+                ctx.send(
+                    target_for(&data),
+                    UpdateRequest {
+                        brightness: Some(slider_to_brightness(data.brightness)),
                         kelvin: Some(warmth_to_kelvin(data.warmth)),
+                        ..Default::default()
                     },
-                });
+                );
+                let mut states = ctx.states.borrow_mut();
+                for s in states.iter_mut() {
+                    if data.is_all || s.id == data.id.as_str() {
+                        s.brightness = slider_to_brightness(data.brightness);
+                        s.kelvin = warmth_to_kelvin(data.warmth);
+                    }
+                }
             }
         }
     });
 
-    // ---- Group callbacks ----
-
+    // ---- Group cards ----
     ui.on_group_brightness_changed({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx, value| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
+            ctx.dragging.set(true);
             let model = ui.get_groups_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 data.brightness = value;
                 model.set_row_data(idx, data.clone());
-                let _ = tx.send(UpdateCommand::SliderDrag {
-                    target: UpdateTarget::Group(data.name.to_string()),
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: Some(brightness_to_api(value)),
-                        kelvin: None,
+                ctx.send(
+                    UpdateTarget::Group(data.name.to_string()),
+                    UpdateRequest {
+                        brightness: Some(slider_to_brightness(value)),
+                        ..Default::default()
                     },
-                });
+                );
             }
         }
     });
 
     ui.on_group_warmth_changed({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx, value| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
+            ctx.dragging.set(true);
             let model = ui.get_groups_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 data.warmth = value;
                 model.set_row_data(idx, data.clone());
-                let _ = tx.send(UpdateCommand::SliderDrag {
-                    target: UpdateTarget::Group(data.name.to_string()),
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: None,
+                ctx.send(
+                    UpdateTarget::Group(data.name.to_string()),
+                    UpdateRequest {
                         kelvin: Some(warmth_to_kelvin(value)),
+                        ..Default::default()
                     },
-                });
+                );
             }
         }
     });
 
     ui.on_group_power_toggled({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_groups_model();
             let idx = idx as usize;
             if let Some(mut data) = model.row_data(idx) {
                 let new_power = !data.power_on;
                 data.power_on = new_power;
                 model.set_row_data(idx, data.clone());
-                let _ = tx.send(UpdateCommand::PowerToggle {
-                    target: UpdateTarget::Group(data.name.to_string()),
-                    on: new_power,
-                });
+                let name = data.name.to_string();
+                {
+                    let groups = ctx.groups.borrow();
+                    let mut states = ctx.states.borrow_mut();
+                    if let Some(g) = groups.iter().find(|g| g.name == name) {
+                        for s in states.iter_mut() {
+                            if g.members.contains(&s.id) {
+                                s.on = new_power;
+                            }
+                        }
+                    }
+                }
+                ctx.send(
+                    UpdateTarget::Group(name),
+                    UpdateRequest {
+                        on: Some(u8::from(new_power)),
+                        ..Default::default()
+                    },
+                );
             }
         }
     });
 
     ui.on_group_slider_released({
-        let ui_weak = ui.as_weak();
-        let tx = cmd_tx.clone();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let Some(ui) = ui_weak.upgrade() else { return };
+            ctx.dragging.set(false);
+            ctx.touched();
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_groups_model();
-            let idx = idx as usize;
-            if let Some(data) = model.row_data(idx) {
-                let _ = tx.send(UpdateCommand::SliderRelease {
-                    target: UpdateTarget::Group(data.name.to_string()),
-                    payload: UpdatePayload {
-                        on: None,
-                        brightness: Some(brightness_to_api(data.brightness)),
-                        kelvin: Some(warmth_to_kelvin(data.warmth)),
+            if let Some(data) = model.row_data(idx as usize) {
+                let name = data.name.to_string();
+                let (b, k) = (
+                    slider_to_brightness(data.brightness),
+                    warmth_to_kelvin(data.warmth),
+                );
+                {
+                    let groups = ctx.groups.borrow();
+                    let mut states = ctx.states.borrow_mut();
+                    if let Some(g) = groups.iter().find(|g| g.name == name) {
+                        for s in states.iter_mut() {
+                            if g.members.contains(&s.id) {
+                                s.brightness = b;
+                                s.kelvin = k;
+                            }
+                        }
+                    }
+                }
+                ctx.send(
+                    UpdateTarget::Group(name),
+                    UpdateRequest {
+                        brightness: Some(b),
+                        kelvin: Some(k),
+                        ..Default::default()
                     },
-                });
+                );
             }
         }
     });
 
     // ---- Window management ----
-
     ui.on_request_quit(|| {
         let _ = slint::quit_event_loop();
     });
@@ -366,231 +687,159 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         move || {
             if let Some(ui) = ui_weak.upgrade() {
-                ui.window().with_winit_window(|w| {
-                    w.set_minimized(true);
-                });
+                ui.window().with_winit_window(|w| w.set_minimized(true));
             }
         }
     });
+
+    // ---- Manage lights panel ----
+    let load_manage = {
+        let ctx = Rc::clone(&ctx);
+        move |scan: bool| {
+            let ctx2 = Rc::clone(&ctx);
+            if scan {
+                if let Some(ui) = ctx.ui() {
+                    ui.set_scanning(true);
+                }
+            }
+            ctx.fetcher.run(
+                move |api| {
+                    if scan {
+                        if let Err(e) = api.refresh() {
+                            eprintln!("scan failed: {e}");
+                        }
+                    }
+                    let lights = api.get_lights().unwrap_or_default();
+                    let states = api.get_states().unwrap_or_default();
+                    (lights, states)
+                },
+                move |(lights, states)| {
+                    let Some(ui) = ctx2.ui() else { return };
+                    ui.set_manage_model(ModelRc::from(Rc::new(VecModel::from(manage_entries(
+                        &lights, &states,
+                    )))));
+                    ui.set_scanning(false);
+                    *ctx2.states.borrow_mut() = states;
+                    ctx2.sync_models();
+                },
+            );
+        }
+    };
 
     ui.on_request_add({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
-        move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let lights = api.get_lights().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                let entries: Vec<ManageLightEntry> = lights
-                    .iter()
-                    .map(|rec| {
-                        let reachable = states.iter().any(|s| s.id == rec.id);
-                        ManageLightEntry {
-                            id: SharedString::from(rec.id.as_str()),
-                            name: SharedString::from(rec.name.as_str()),
-                            alias: SharedString::from(rec.alias.as_deref().unwrap_or("")),
-                            enabled: rec.enabled,
-                            reachable,
-                        }
-                    })
-                    .collect();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    let model = Rc::new(VecModel::from(entries));
-                    ui.set_manage_model(ModelRc::from(model));
-                })
-                .ok();
-            });
-        }
+        let load_manage = load_manage.clone();
+        move || load_manage(false)
     });
-
     ui.on_request_scan({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
-        move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_scanning(true);
-            }
-            std::thread::spawn(move || {
-                let _ = api.refresh_lights();
-                let lights = api.get_lights().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                let entries: Vec<ManageLightEntry> = lights
-                    .iter()
-                    .map(|rec| {
-                        let reachable = states.iter().any(|s| s.id == rec.id);
-                        ManageLightEntry {
-                            id: SharedString::from(rec.id.as_str()),
-                            name: SharedString::from(rec.name.as_str()),
-                            alias: SharedString::from(rec.alias.as_deref().unwrap_or("")),
-                            enabled: rec.enabled,
-                            reachable,
-                        }
-                    })
-                    .collect();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    let model = Rc::new(VecModel::from(entries));
-                    ui.set_manage_model(ModelRc::from(model));
-                    ui.set_scanning(false);
-                })
-                .ok();
-            });
-        }
+        let load_manage = load_manage.clone();
+        move || load_manage(true)
     });
 
     ui.on_manage_enable_toggled({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let ui_weak = ui_weak.clone();
-            let api = api.clone();
-            let ui = match ui_weak.upgrade() {
-                Some(ui) => ui,
-                None => return,
-            };
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_manage_model();
             let idx = idx as usize;
             if let Some(mut entry) = model.row_data(idx) {
-                let new_enabled = !entry.enabled;
-                entry.enabled = new_enabled;
+                let enabled = !entry.enabled;
+                entry.enabled = enabled;
                 model.set_row_data(idx, entry.clone());
                 let id = entry.id.to_string();
-                std::thread::spawn(move || {
-                    let _ = api.set_light_enabled(&id, new_enabled);
-                    let lights = api.get_lights().unwrap_or_default();
-                    let states = api.get_light_states().unwrap_or_default();
-                    slint::invoke_from_event_loop(move || {
-                        let Some(ui) = ui_weak.upgrade() else { return };
-                        rebuild_lights_model(&ui, &lights, &states);
-                    })
-                    .ok();
-                });
+                let ctx2 = Rc::clone(&ctx);
+                ctx.fetcher.run(
+                    move |api| api.set_enabled(&id, enabled).map(|_| ()),
+                    move |res| {
+                        if let Err(e) = res {
+                            eprintln!("set_enabled failed: {e}");
+                        }
+                        ctx2.force_snapshot();
+                    },
+                );
             }
         }
     });
 
     ui.on_manage_rename({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |idx, new_name| {
-            let api = api.clone();
-            let ui = match ui_weak.upgrade() {
-                Some(ui) => ui,
-                None => return,
-            };
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_manage_model();
             let idx = idx as usize;
             if let Some(mut entry) = model.row_data(idx) {
-                entry.alias = new_name.clone();
+                let alias = new_name.to_string();
+                entry.alias = SharedString::from(alias.trim());
                 model.set_row_data(idx, entry.clone());
                 let id = entry.id.to_string();
-                let alias = new_name.to_string();
-                std::thread::spawn(move || {
-                    let _ = api.set_light_alias(&id, &alias);
-                });
+                let ctx2 = Rc::clone(&ctx);
+                ctx.fetcher.run(
+                    move |api| api.set_alias(&id, &alias).map(|_| ()),
+                    move |res| {
+                        if let Err(e) = res {
+                            eprintln!("set_alias failed: {e}");
+                        }
+                        ctx2.force_snapshot();
+                    },
+                );
             }
         }
     });
 
     ui.on_manage_delete({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let ui_weak = ui_weak.clone();
-            let api = api.clone();
-            let ui = match ui_weak.upgrade() {
-                Some(ui) => ui,
-                None => return,
-            };
+            let Some(ui) = ctx.ui() else { return };
             let manage = ui.get_manage_model();
             let idx = idx as usize;
             if let Some(entry) = manage.row_data(idx) {
-                // Remove from manage model immediately
-                let mut entries: Vec<ManageLightEntry> = Vec::new();
-                for i in 0..manage.row_count() {
-                    if i != idx {
-                        if let Some(e) = manage.row_data(i) {
-                            entries.push(e);
-                        }
-                    }
-                }
+                let entries: Vec<ManageLightEntry> = (0..manage.row_count())
+                    .filter(|i| *i != idx)
+                    .filter_map(|i| manage.row_data(i))
+                    .collect();
                 ui.set_manage_model(ModelRc::from(Rc::new(VecModel::from(entries))));
-
-                // Also remove from lights model immediately
-                let lmodel = ui.get_lights_model();
-                let light_id = entry.id.clone();
-                let mut light_entries: Vec<LightData> = Vec::new();
-                for i in 0..lmodel.row_count() {
-                    if let Some(d) = lmodel.row_data(i) {
-                        if d.id != light_id {
-                            light_entries.push(d);
-                        }
-                    }
-                }
-                ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(light_entries))));
-
                 let id = entry.id.to_string();
-                std::thread::spawn(move || {
-                    if let Err(e) = api.delete_light(&id) {
-                        eprintln!("delete_light failed: {e}");
-                    }
-                });
+                ctx.states.borrow_mut().retain(|s| s.id != id);
+                ctx.sync_models();
+                let ctx2 = Rc::clone(&ctx);
+                ctx.fetcher.run(
+                    move |api| api.delete_light(&id),
+                    move |res| {
+                        if let Err(e) = res {
+                            eprintln!("delete_light failed: {e}");
+                        }
+                        ctx2.force_snapshot();
+                    },
+                );
             }
         }
     });
 
     ui.on_manage_close({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
-        move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let lights = api.get_lights().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    rebuild_lights_model(&ui, &lights, &states);
-                })
-                .ok();
-            });
-        }
+        let ctx = Rc::clone(&ctx);
+        move || ctx.force_snapshot()
     });
 
-    // ---- Manage groups panel callbacks ----
-
+    // ---- Manage groups panel ----
     ui.on_request_groups_panel({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let lights = api.get_lights().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                let picks: Vec<GroupLightPick> = lights
-                    .iter()
-                    .filter(|l| l.enabled && states.iter().any(|s| s.id == l.id))
-                    .map(|l| GroupLightPick {
-                        id: SharedString::from(l.id.as_str()),
-                        name: SharedString::from(
-                            l.alias.as_deref().unwrap_or(l.name.as_str()),
-                        ),
-                        selected: false,
-                    })
-                    .collect();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    ui.set_group_lights_pick(ModelRc::from(
-                        Rc::new(VecModel::from(picks)),
-                    ));
-                })
-                .ok();
-            });
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                |api| api.get_states().unwrap_or_default(),
+                move |states| {
+                    let Some(ui) = ctx2.ui() else { return };
+                    let picks: Vec<GroupLightPick> = states
+                        .iter()
+                        .filter(|s| s.enabled)
+                        .map(|s| GroupLightPick {
+                            id: SharedString::from(s.id.as_str()),
+                            name: SharedString::from(s.display_name()),
+                            selected: false,
+                        })
+                        .collect();
+                    ui.set_group_lights_pick(ModelRc::from(Rc::new(VecModel::from(picks))));
+                },
+            );
         }
     });
 
@@ -608,118 +857,277 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_group_manage_save({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |name| {
-            let name = name.to_string();
-            if name.trim().is_empty() {
+            let name = name.trim().to_string();
+            if name.is_empty() {
                 return;
             }
-            let ui = match ui_weak.upgrade() {
-                Some(ui) => ui,
-                None => return,
-            };
-            let pick_model = ui.get_group_lights_pick();
-            let members: Vec<String> = (0..pick_model.row_count())
-                .filter_map(|i| {
-                    let entry = pick_model.row_data(i)?;
-                    if entry.selected {
-                        Some(entry.id.to_string())
-                    } else {
-                        None
-                    }
-                })
+            let Some(ui) = ctx.ui() else { return };
+            let picks = ui.get_group_lights_pick();
+            let members: Vec<String> = (0..picks.row_count())
+                .filter_map(|i| picks.row_data(i))
+                .filter(|p| p.selected)
+                .map(|p| p.id.to_string())
                 .collect();
             if members.is_empty() {
                 return;
             }
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = api.create_group(&name, &members) {
-                    eprintln!("create_group failed: {e}");
-                    return;
-                }
-                let groups = api.get_groups().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    rebuild_groups_model(&ui, &groups, &states);
-                    ui.set_groups_panel_open(false);
-                })
-                .ok();
-            });
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                move |api| api.create_group(&name, &members).map(|_| ()),
+                move |res| {
+                    match res {
+                        Ok(()) => {
+                            if let Some(ui) = ctx2.ui() {
+                                ui.set_groups_panel_open(false);
+                            }
+                        }
+                        Err(e) => eprintln!("create_group failed: {e}"),
+                    }
+                    ctx2.force_snapshot();
+                },
+            );
         }
     });
 
     ui.on_group_manage_delete({
-        let api = fetch_api.clone();
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |idx| {
-            let ui = match ui_weak.upgrade() {
-                Some(ui) => ui,
-                None => return,
-            };
+            let Some(ui) = ctx.ui() else { return };
             let model = ui.get_groups_model();
             let idx = idx as usize;
             if let Some(data) = model.row_data(idx) {
                 let name = data.name.to_string();
-                let mut entries: Vec<GroupData> = Vec::new();
-                for i in 0..model.row_count() {
-                    if i != idx {
-                        if let Some(d) = model.row_data(i) {
-                            entries.push(d);
+                ctx.groups.borrow_mut().retain(|g| g.name != name);
+                ctx.sync_models();
+                let ctx2 = Rc::clone(&ctx);
+                ctx.fetcher.run(
+                    move |api| api.delete_group(&name),
+                    move |res| {
+                        if let Err(e) = res {
+                            eprintln!("delete_group failed: {e}");
                         }
-                    }
-                }
-                ui.set_groups_model(ModelRc::from(Rc::new(VecModel::from(entries))));
-
-                let api = api.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = api.delete_group(&name) {
-                        eprintln!("delete_group failed: {e}");
-                    }
-                });
+                        ctx2.force_snapshot();
+                    },
+                );
             }
         }
     });
 
     ui.on_group_manage_close({
-        let api = fetch_api.clone();
+        let ctx = Rc::clone(&ctx);
+        move || ctx.force_snapshot()
+    });
+
+    // ---- Settings ----
+    ui.on_autostart_toggled({
         let ui_weak = ui.as_weak();
+        move |enabled| {
+            let result = if enabled {
+                autostart::enable()
+            } else {
+                autostart::disable()
+            };
+            if let Err(e) = result {
+                eprintln!("autostart change failed: {e}");
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_autostart_enabled(autostart::enabled());
+            }
+        }
+    });
+
+    ui.on_auto_enable_toggled({
+        let ctx = Rc::clone(&ctx);
+        move |enabled| {
+            if let Some(ui) = ctx.ui() {
+                ui.set_auto_enable_discovered(enabled);
+            }
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                move |api| {
+                    let mut s = api.get_settings().unwrap_or_default();
+                    s.auto_enable_discovered = enabled;
+                    api.set_settings(&s)
+                },
+                move |res| match res {
+                    Ok(s) => {
+                        if let Some(ui) = ctx2.ui() {
+                            ui.set_auto_enable_discovered(s.auto_enable_discovered);
+                        }
+                    }
+                    Err(e) => eprintln!("set_settings failed: {e}"),
+                },
+            );
+        }
+    });
+
+    // ---- Per-light settings panel ----
+    ui.on_light_settings_requested({
+        let ctx = Rc::clone(&ctx);
+        move |idx| {
+            let Some(ui) = ctx.ui() else { return };
+            let Some(card) = ui.get_lights_model().row_data(idx as usize) else {
+                return;
+            };
+            if card.is_all {
+                return;
+            }
+            let id = card.id.to_string();
+            ui.set_light_settings(LightSettingsData {
+                id: SharedString::from(id.as_str()),
+                status: SharedString::from("Loading…"),
+                loaded: false,
+                ..Default::default()
+            });
+            ui.set_light_settings_open(true);
+            let ctx2 = Rc::clone(&ctx);
+            let id2 = id.clone();
+            ctx.fetcher.run(
+                move |api| (api.get_record(&id2), api.get_device_settings(&id2)),
+                move |(record, settings)| {
+                    let Some(ui) = ctx2.ui() else { return };
+                    let mut data = ui.get_light_settings();
+                    if data.id.as_str() != id {
+                        return; // user opened a different light meanwhile
+                    }
+                    match (record, settings) {
+                        (Ok(rec), Ok(s)) => {
+                            let info = rec
+                                .accessory_info
+                                .as_ref()
+                                .and_then(limelight_core::elgato::AccessoryInfo::from_value)
+                                .unwrap_or_default();
+                            data.name = SharedString::from(rec.name.as_str());
+                            data.original_name = SharedString::from(rec.name.as_str());
+                            data.product = SharedString::from(
+                                rec.product.as_deref().unwrap_or("Elgato light"),
+                            );
+                            data.firmware = SharedString::from(info.firmware_version.as_str());
+                            data.serial = SharedString::from(rec.serial.as_deref().unwrap_or(""));
+                            data.address = SharedString::from(rec.primary_address().unwrap_or(""));
+                            data.restore_last = s.power_on_behavior.unwrap_or(1) != 2;
+                            data.default_brightness =
+                                brightness_to_slider(s.power_on_brightness.unwrap_or(50));
+                            data.default_warmth =
+                                kelvin_to_warmth(limelight_core::convert::mired_to_kelvin(
+                                    s.power_on_temperature.unwrap_or(213),
+                                ));
+                            data.switch_on_ms = s.switch_on_duration_ms.unwrap_or(100) as i32;
+                            data.switch_off_ms = s.switch_off_duration_ms.unwrap_or(300) as i32;
+                            data.color_change_ms = s.color_change_duration_ms.unwrap_or(100) as i32;
+                            data.status = SharedString::from("");
+                            data.loaded = true;
+                        }
+                        (Err(e), _) | (_, Err(e)) => {
+                            data.status =
+                                SharedString::from(format!("Could not load settings: {e}"));
+                            data.loaded = false;
+                        }
+                    }
+                    ui.set_light_settings(data);
+                },
+            );
+        }
+    });
+
+    ui.on_light_settings_save({
+        let ctx = Rc::clone(&ctx);
         move || {
-            let api = api.clone();
-            let ui_weak = ui_weak.clone();
-            std::thread::spawn(move || {
-                let groups = api.get_groups().unwrap_or_default();
-                let states = api.get_light_states().unwrap_or_default();
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return };
-                    rebuild_groups_model(&ui, &groups, &states);
-                })
-                .ok();
+            let Some(ui) = ctx.ui() else { return };
+            let mut data = ui.get_light_settings();
+            if !data.loaded {
+                return;
+            }
+            data.status = SharedString::from("Saving…");
+            ui.set_light_settings(data.clone());
+            let id = data.id.to_string();
+            let new_name = data.name.trim().to_string();
+            let rename = if !new_name.is_empty() && new_name != data.original_name.as_str() {
+                Some(new_name)
+            } else {
+                None
+            };
+            let settings = limelight_core::elgato::DeviceSettings {
+                power_on_behavior: Some(if data.restore_last { 1 } else { 2 }),
+                power_on_brightness: Some(slider_to_brightness(data.default_brightness)),
+                power_on_temperature: Some(limelight_core::convert::kelvin_to_mired(
+                    warmth_to_kelvin(data.default_warmth),
+                )),
+                switch_on_duration_ms: Some(data.switch_on_ms.max(0) as u32),
+                switch_off_duration_ms: Some(data.switch_off_ms.max(0) as u32),
+                color_change_duration_ms: Some(data.color_change_ms.max(0) as u32),
+                ..Default::default()
+            };
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                move |api| {
+                    let settings = api.set_device_settings(&id, &settings);
+                    let renamed = match &rename {
+                        Some(name) => api.rename_device(&id, name).map(|_| true),
+                        None => Ok(false),
+                    };
+                    (settings, renamed)
+                },
+                move |(settings, renamed)| {
+                    let Some(ui) = ctx2.ui() else { return };
+                    let mut data = ui.get_light_settings();
+                    data.status = SharedString::from(match (&settings, &renamed) {
+                        (Ok(_), Ok(_)) => "Saved".to_string(),
+                        (Err(e), _) => format!("Settings not saved: {e}"),
+                        (_, Err(e)) => format!("Saved, but rename failed: {e}"),
+                    });
+                    if renamed.as_ref().map(|r| *r).unwrap_or(false) {
+                        data.original_name = data.name.clone();
+                    }
+                    ui.set_light_settings(data);
+                    ctx2.force_snapshot();
+                },
+            );
+        }
+    });
+
+    ui.on_light_settings_identify({
+        let ctx = Rc::clone(&ctx);
+        move || {
+            let Some(ui) = ctx.ui() else { return };
+            let id = ui.get_light_settings().id.to_string();
+            if id.is_empty() {
+                return;
+            }
+            ctx.fetcher.fire(move |api| {
+                if let Err(e) = api.identify(&id) {
+                    eprintln!("identify failed: {e}");
+                }
             });
         }
     });
 
-    // ---- Settings: autostart ----
-
-    ui.set_autostart_enabled(autostart_desktop_exists());
-
-    ui.on_autostart_toggled({
-        let ui_weak = ui.as_weak();
-        move |enabled| {
-            if enabled {
-                write_autostart_desktop();
-            } else {
-                remove_autostart_desktop();
-            }
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_autostart_enabled(autostart_desktop_exists());
-            }
-        }
+    ui.on_light_settings_close({
+        let ctx = Rc::clone(&ctx);
+        move || ctx.force_snapshot()
     });
 
+    // Dev aid: LIMELIGHT_OPEN_SETTINGS=1 opens the first light's settings panel
+    // shortly after start (used to screenshot / verify the panel without input).
+    let dev_open_timer = slint::Timer::default();
+    if std::env::var("LIMELIGHT_OPEN_SETTINGS").is_ok() {
+        let ui_weak = ui.as_weak();
+        dev_open_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(2500),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    if ui.get_lights_model().row_count() > 1 {
+                        ui.invoke_light_settings_requested(1);
+                    }
+                }
+            },
+        );
+    }
+
+    // ---- Window drag (frameless window) + focus tracking ----
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
     let drag_in_progress = Rc::new(RefCell::new(false));
     let cursor_left_during_drag = Rc::new(RefCell::new(false));
@@ -727,16 +1135,20 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.window().on_winit_window_event({
         let drag_in_progress = Rc::clone(&drag_in_progress);
         let cursor_left_during_drag = Rc::clone(&cursor_left_during_drag);
-        let ui_weak = ui.as_weak();
+        let ctx = Rc::clone(&ctx);
         move |_w, event| {
             match event {
-                WindowEvent::MouseInput { .. } => {}
-                WindowEvent::Touch { .. } => {}
+                WindowEvent::Focused(focused) => {
+                    ctx.window_focused.set(*focused);
+                    if *focused {
+                        ctx.request_snapshot();
+                    }
+                }
                 WindowEvent::CursorMoved { .. } => {
                     if *drag_in_progress.borrow() {
                         *drag_in_progress.borrow_mut() = false;
                         *cursor_left_during_drag.borrow_mut() = false;
-                        if let Some(ui) = ui_weak.upgrade() {
+                        if let Some(ui) = ctx.ui() {
                             ui.invoke_reset_drag_state();
                         }
                     }
@@ -745,7 +1157,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     if *drag_in_progress.borrow() && *cursor_left_during_drag.borrow() {
                         *drag_in_progress.borrow_mut() = false;
                         *cursor_left_during_drag.borrow_mut() = false;
-                        if let Some(ui) = ui_weak.upgrade() {
+                        if let Some(ui) = ctx.ui() {
                             ui.invoke_reset_drag_state();
                         }
                     }
@@ -781,18 +1193,16 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_drag_window_by({
         let ui_weak = ui.as_weak();
         move |dx, dy| {
-            if is_wayland {
-                return;
-            }
-            if dx == 0 && dy == 0 {
+            if is_wayland || (dx == 0 && dy == 0) {
                 return;
             }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.window().with_winit_window(|w| {
                     if let Ok(pos) = w.outer_position() {
-                        let new_pos =
-                            winit::dpi::PhysicalPosition::new(pos.x + dx, pos.y + dy);
-                        w.set_outer_position(new_pos);
+                        w.set_outer_position(winit::dpi::PhysicalPosition::new(
+                            pos.x + dx,
+                            pos.y + dy,
+                        ));
                     }
                 });
             }
@@ -810,197 +1220,29 @@ fn target_for(data: &LightData) -> UpdateTarget {
     }
 }
 
-/// If ANY individual light is on, set the ALL card to on; otherwise off.
-fn sync_all_card_power(model: &ModelRc<LightData>) {
-    let any_on = (1..model.row_count()).any(|i| {
-        model.row_data(i).map(|d| d.power_on).unwrap_or(false)
-    });
-    if let Some(mut all) = model.row_data(0) {
-        if all.is_all && all.power_on != any_on {
-            all.power_on = any_on;
-            model.set_row_data(0, all);
-        }
-    }
-}
-
-/// Rebuild the main lights model from fresh API data (ALL card + enabled & reachable lights).
-fn rebuild_lights_model(
-    ui: &MainWindow,
-    lights: &[LightRecord],
-    states: &[api::LightStateResponse],
-) {
-    let any_on = states.iter().any(|s| {
-        s.on && lights.iter().any(|l| l.id == s.id && l.enabled)
-    });
-    let mut entries = vec![LightData {
-        id: SharedString::from("__all__"),
-        name: SharedString::from("All Lights"),
-        brightness: 0.5,
-        warmth: 0.5,
-        power_on: any_on,
-        is_all: true,
-    }];
-    for state in states {
-        let record = lights.iter().find(|l| l.id == state.id);
-        let is_enabled = record.map(|r| r.enabled).unwrap_or(false);
-        if !is_enabled {
-            continue;
-        }
-        let display_name = record
-            .and_then(|r| r.alias.as_deref())
-            .unwrap_or_else(|| record.map(|r| r.name.as_str()).unwrap_or("Unknown Light"));
-        entries.push(LightData {
-            id: SharedString::from(state.id.as_str()),
-            name: SharedString::from(display_name),
-            brightness: api_to_brightness(state.brightness),
-            warmth: kelvin_to_warmth(state.kelvin),
-            power_on: state.on,
-            is_all: false,
-        });
-    }
-    ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(entries))));
-}
-
-/// Rebuild the groups model from fresh API data, syncing power state per group.
-fn rebuild_groups_model(
-    ui: &MainWindow,
-    groups: &[GroupRecord],
-    states: &[api::LightStateResponse],
-) {
-    let entries: Vec<GroupData> = groups
-        .iter()
-        .map(|g| {
-            let any_on = g.members.iter().any(|mid| {
-                states.iter().any(|s| s.id == *mid && s.on)
-            });
-            GroupData {
-                name: SharedString::from(g.name.as_str()),
-                brightness: 0.5,
-                warmth: 0.5,
-                power_on: any_on,
-            }
-        })
+/// Recompute the "All Lights" card from the individual cards (power = any on,
+/// sliders = average of reachable lights).
+fn refresh_all_card(model: &ModelRc<LightData>) {
+    let rows: Vec<LightData> = (1..model.row_count())
+        .filter_map(|i| model.row_data(i))
         .collect();
-    ui.set_groups_model(ModelRc::from(Rc::new(VecModel::from(entries))));
-}
-
-// ---- Autostart (.desktop file in ~/.config/autostart/) ----
-
-const FLATPAK_APP_ID: &str = "io.github.chimi6.limelight-linux-elgato-lights-controller";
-
-fn is_flatpak() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
-}
-
-fn autostart_dir() -> std::path::PathBuf {
-    if is_flatpak() {
-        // Inside Flatpak, XDG_CONFIG_HOME is sandboxed — but autostart
-        // needs to live on the host at ~/.config/autostart/.
-        // Flatpak exposes the host home via /var/home or ~/.
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/var/home"))
-            .join(".config/autostart")
+    let any_on = rows.iter().any(|d| d.power_on);
+    let reachable: Vec<&LightData> = rows.iter().filter(|d| d.reachable).collect();
+    let (b, w) = if reachable.is_empty() {
+        (0.5, 0.5)
     } else {
-        dirs::config_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
-            .join("autostart")
-    }
-}
-
-fn autostart_path() -> std::path::PathBuf {
-    autostart_dir().join(format!("{FLATPAK_APP_ID}.desktop"))
-}
-
-fn autostart_desktop_exists() -> bool {
-    autostart_path().exists()
-}
-
-fn autostart_exec_line() -> String {
-    if is_flatpak() {
-        format!("flatpak run {FLATPAK_APP_ID}")
-    } else {
-        std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("keylight-gui"))
-            .display()
-            .to_string()
-    }
-}
-
-fn write_autostart_desktop() {
-    let dir = autostart_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let contents = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=LimeLight\n\
-         Comment=Elgato Key Light Controller\n\
-         Exec={}\n\
-         Terminal=false\n\
-         X-GNOME-Autostart-enabled=true\n",
-        autostart_exec_line()
-    );
-    if let Err(e) = std::fs::write(autostart_path(), contents) {
-        eprintln!("failed to write autostart desktop file: {e}");
-    }
-}
-
-fn remove_autostart_desktop() {
-    if let Err(e) = std::fs::remove_file(autostart_path()) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("failed to remove autostart desktop file: {e}");
-        }
-    }
-}
-
-/// If the keylightd daemon isn't reachable, spawn it in the background and wait briefly.
-fn ensure_daemon_running() {
-    let probe = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
-        .build()
-        .ok()
-        .and_then(|c| c.get("http://127.0.0.1:9124/v1/lights").send().ok());
-
-    if probe.is_some() {
-        return;
-    }
-
-    eprintln!("keylightd not reachable, attempting to start…");
-
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-    let daemon_path = exe_dir
-        .as_ref()
-        .map(|d| d.join("keylightd"))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("keylightd"));
-
-    match std::process::Command::new(&daemon_path)
-        .arg("serve")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => {
-            // Give the daemon a moment to bind its port
-            for _ in 0..10 {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let ok = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_millis(500))
-                    .build()
-                    .ok()
-                    .and_then(|c| c.get("http://127.0.0.1:9124/v1/lights").send().ok());
-                if ok.is_some() {
-                    eprintln!("keylightd is now running");
-                    return;
-                }
-            }
-            eprintln!("keylightd spawned but still not reachable — continuing anyway");
-        }
-        Err(e) => {
-            eprintln!("failed to start keylightd: {e}");
+        let n = reachable.len() as f32;
+        (
+            reachable.iter().map(|d| d.brightness).sum::<f32>() / n,
+            reachable.iter().map(|d| d.warmth).sum::<f32>() / n,
+        )
+    };
+    if let Some(mut all) = model.row_data(0) {
+        if all.is_all && (all.power_on != any_on || all.brightness != b || all.warmth != w) {
+            all.power_on = any_on;
+            all.brightness = b;
+            all.warmth = w;
+            model.set_row_data(0, all);
         }
     }
 }

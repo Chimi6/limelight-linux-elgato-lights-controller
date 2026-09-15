@@ -1,181 +1,231 @@
-use serde::{Deserialize, Serialize};
+//! Thin blocking client for the keylightd localhost API.
 
-const BASE_URL: &str = "http://127.0.0.1:9124";
+use limelight_core::api::{
+    encode_path_segment, Group, HealthResponse, LightRecord, LightStateResponse, Settings,
+    UpdateRequest, UpdateResponse,
+};
+use limelight_core::elgato::DeviceSettings;
+use serde::de::DeserializeOwned;
+use std::fmt;
+use std::time::Duration;
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct LightRecord {
-    pub id: String,
-    pub alias: Option<String>,
-    pub name: String,
-    pub enabled: bool,
+#[derive(Debug, Clone)]
+pub struct ApiError(pub String);
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct LightStateResponse {
-    pub id: String,
-    pub on: bool,
-    pub brightness: u8,
-    pub kelvin: u16,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct GroupRecord {
-    pub name: String,
-    pub members: Vec<String>,
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub struct UpdatePayload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub on: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub brightness: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kelvin: Option<u16>,
-}
-
-pub const KELVIN_MIN: f32 = 2900.0;
-pub const KELVIN_MAX: f32 = 7000.0;
-pub const KELVIN_RANGE: f32 = KELVIN_MAX - KELVIN_MIN;
-
-/// warmth 0.0 (cool/left) → 7000K, warmth 1.0 (warm/right) → 2900K
-pub fn warmth_to_kelvin(warmth: f32) -> u16 {
-    (KELVIN_MAX - warmth * KELVIN_RANGE)
-        .round()
-        .clamp(KELVIN_MIN, KELVIN_MAX) as u16
-}
-
-pub fn kelvin_to_warmth(kelvin: u16) -> f32 {
-    ((KELVIN_MAX - kelvin as f32) / KELVIN_RANGE).clamp(0.0, 1.0)
-}
-
-pub fn brightness_to_api(slider: f32) -> u8 {
-    (slider * 100.0).round().clamp(0.0, 100.0) as u8
-}
-
-pub fn api_to_brightness(api: u8) -> f32 {
-    api as f32 / 100.0
+impl From<ureq::Error> for ApiError {
+    fn from(err: ureq::Error) -> Self {
+        ApiError(err.to_string())
+    }
 }
 
 #[derive(Clone)]
 pub struct ApiClient {
-    client: reqwest::blocking::Client,
+    agent: ureq::Agent,
+    base: String,
 }
 
 impl ApiClient {
     pub fn new() -> Self {
+        Self::with_timeout(Duration::from_secs(20))
+    }
+
+    /// `total` must cover the daemon's own fan-out (a scan is up to 15 s).
+    pub fn with_timeout(total: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_millis(500)))
+            .timeout_global(Some(total))
+            .http_status_as_error(false)
+            .user_agent("limelight-gui")
+            .build();
         Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build()
-                .expect("failed to build reqwest client"),
+            agent: config.into(),
+            base: limelight_core::daemon_base_url(),
         }
     }
 
-    pub fn get_lights(&self) -> Result<Vec<LightRecord>, reqwest::Error> {
-        self.client
-            .get(format!("{BASE_URL}/v1/lights"))
-            .send()?
-            .error_for_status()?
-            .json()
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base, path)
     }
 
-    pub fn get_light_states(&self) -> Result<Vec<LightStateResponse>, reqwest::Error> {
-        self.client
-            .get(format!("{BASE_URL}/v1/lights/states"))
-            .send()?
-            .error_for_status()?
-            .json()
+    fn decode<T: DeserializeOwned>(
+        mut resp: ureq::http::Response<ureq::Body>,
+    ) -> Result<T, ApiError> {
+        let status = resp.status().as_u16();
+        let text = resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| ApiError(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("HTTP {status}"));
+            return Err(ApiError(msg));
+        }
+        serde_json::from_str::<T>(&text).map_err(|e| ApiError(format!("bad response: {e}")))
     }
 
-    pub fn update_light(&self, id: &str, payload: &UpdatePayload) -> Result<(), reqwest::Error> {
-        self.client
-            .put(format!("{BASE_URL}/v1/lights/{id}"))
-            .json(payload)
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        Self::decode(self.agent.get(&self.url(path)).call()?)
     }
 
-    pub fn update_all(&self, payload: &UpdatePayload) -> Result<(), reqwest::Error> {
-        self.client
-            .put(format!("{BASE_URL}/v1/all"))
-            .json(payload)
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    fn put<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        Self::decode(self.agent.put(&self.url(path)).send_json(body)?)
     }
 
-    pub fn update_group(&self, name: &str, payload: &UpdatePayload) -> Result<(), reqwest::Error> {
-        self.client
-            .put(format!("{BASE_URL}/v1/groups/{name}"))
-            .json(payload)
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    fn post<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        Self::decode(self.agent.post(&self.url(path)).send_json(body)?)
     }
 
-    pub fn get_groups(&self) -> Result<Vec<GroupRecord>, reqwest::Error> {
-        self.client
-            .get(format!("{BASE_URL}/v1/groups"))
-            .send()?
-            .error_for_status()?
-            .json()
+    fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        Self::decode(self.agent.post(&self.url(path)).send_empty()?)
     }
 
-    pub fn refresh_lights(&self) -> Result<(), reqwest::Error> {
-        self.client
-            .post(format!("{BASE_URL}/v1/lights/refresh"))
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        Self::decode(self.agent.delete(&self.url(path)).call()?)
     }
 
-    pub fn set_light_enabled(&self, id: &str, enabled: bool) -> Result<(), reqwest::Error> {
-        self.client
-            .put(format!("{BASE_URL}/v1/lights/{id}/enabled"))
-            .json(&serde_json::json!({ "enabled": enabled }))
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    // ---- endpoints ----
+
+    pub fn health(&self) -> Result<HealthResponse, ApiError> {
+        self.get("/v1/health")
     }
 
-    pub fn set_light_alias(&self, id: &str, alias: &str) -> Result<(), reqwest::Error> {
+    pub fn shutdown(&self) -> Result<(), ApiError> {
+        self.post_empty::<serde_json::Value>("/v1/shutdown")
+            .map(|_| ())
+    }
+
+    pub fn get_lights(&self) -> Result<Vec<LightRecord>, ApiError> {
+        self.get("/v1/lights")
+    }
+
+    pub fn get_states(&self) -> Result<Vec<LightStateResponse>, ApiError> {
+        self.get("/v1/lights/states")
+    }
+
+    pub fn get_groups(&self) -> Result<Vec<Group>, ApiError> {
+        self.get("/v1/groups")
+    }
+
+    pub fn update_light(
+        &self,
+        id: &str,
+        update: &UpdateRequest,
+    ) -> Result<UpdateResponse, ApiError> {
+        self.put(&format!("/v1/lights/{}", encode_path_segment(id)), update)
+    }
+
+    pub fn update_group(
+        &self,
+        name: &str,
+        update: &UpdateRequest,
+    ) -> Result<UpdateResponse, ApiError> {
+        self.put(&format!("/v1/groups/{}", encode_path_segment(name)), update)
+    }
+
+    pub fn update_all(&self, update: &UpdateRequest) -> Result<UpdateResponse, ApiError> {
+        self.put("/v1/all", update)
+    }
+
+    pub fn refresh(&self) -> Result<(), ApiError> {
+        self.post::<_, serde_json::Value>(
+            "/v1/lights/refresh",
+            &serde_json::json!({ "timeout": 3 }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<LightRecord, ApiError> {
+        self.put(
+            &format!("/v1/lights/{}/enabled", encode_path_segment(id)),
+            &serde_json::json!({ "enabled": enabled }),
+        )
+    }
+
+    pub fn set_alias(&self, id: &str, alias: &str) -> Result<LightRecord, ApiError> {
         let value = if alias.trim().is_empty() {
             serde_json::json!({ "alias": null })
         } else {
-            serde_json::json!({ "alias": alias })
+            serde_json::json!({ "alias": alias.trim() })
         };
-        self.client
-            .put(format!("{BASE_URL}/v1/lights/{id}/alias"))
-            .json(&value)
-            .send()?
-            .error_for_status()?;
-        Ok(())
+        self.put(
+            &format!("/v1/lights/{}/alias", encode_path_segment(id)),
+            &value,
+        )
     }
 
-    pub fn delete_light(&self, id: &str) -> Result<(), reqwest::Error> {
-        self.client
-            .delete(format!("{BASE_URL}/v1/lights/{id}"))
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    pub fn identify(&self, id: &str) -> Result<(), ApiError> {
+        self.post_empty::<serde_json::Value>(&format!(
+            "/v1/lights/{}/identify",
+            encode_path_segment(id)
+        ))
+        .map(|_| ())
     }
 
-    pub fn create_group(&self, name: &str, members: &[String]) -> Result<(), reqwest::Error> {
-        self.client
-            .post(format!("{BASE_URL}/v1/groups"))
-            .json(&serde_json::json!({ "name": name, "members": members }))
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    pub fn delete_light(&self, id: &str) -> Result<(), ApiError> {
+        self.delete::<serde_json::Value>(&format!("/v1/lights/{}", encode_path_segment(id)))
+            .map(|_| ())
     }
 
-    pub fn delete_group(&self, name: &str) -> Result<(), reqwest::Error> {
-        self.client
-            .delete(format!("{BASE_URL}/v1/groups/{name}"))
-            .send()?
-            .error_for_status()?;
-        Ok(())
+    pub fn create_group(&self, name: &str, members: &[String]) -> Result<Group, ApiError> {
+        self.post(
+            "/v1/groups",
+            &serde_json::json!({ "name": name, "members": members }),
+        )
+    }
+
+    pub fn delete_group(&self, name: &str) -> Result<(), ApiError> {
+        self.delete::<serde_json::Value>(&format!("/v1/groups/{}", encode_path_segment(name)))
+            .map(|_| ())
+    }
+
+    pub fn get_record(&self, id: &str) -> Result<LightRecord, ApiError> {
+        self.get(&format!("/v1/lights/{}", encode_path_segment(id)))
+    }
+
+    pub fn get_device_settings(&self, id: &str) -> Result<DeviceSettings, ApiError> {
+        self.get(&format!("/v1/lights/{}/settings", encode_path_segment(id)))
+    }
+
+    pub fn set_device_settings(
+        &self,
+        id: &str,
+        settings: &DeviceSettings,
+    ) -> Result<DeviceSettings, ApiError> {
+        self.put(
+            &format!("/v1/lights/{}/settings", encode_path_segment(id)),
+            settings,
+        )
+    }
+
+    /// Renames the device itself (what Control Center does).
+    pub fn rename_device(&self, id: &str, name: &str) -> Result<LightRecord, ApiError> {
+        self.put(
+            &format!("/v1/lights/{}/name", encode_path_segment(id)),
+            &serde_json::json!({ "name": name }),
+        )
+    }
+
+    pub fn get_settings(&self) -> Result<Settings, ApiError> {
+        self.get("/v1/settings")
+    }
+
+    pub fn set_settings(&self, settings: &Settings) -> Result<Settings, ApiError> {
+        self.put("/v1/settings", settings)
     }
 }
