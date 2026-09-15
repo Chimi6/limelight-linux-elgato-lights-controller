@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::config::{Group, LightRecord, Settings};
+pub use crate::config::{Group, LightRecord, Preset, Settings};
 
 /// Fields other than `status` default so a pre-0.2 daemon (which only sent
 /// `{"status":"ok"}`) is recognised as "running but too old" rather than absent.
@@ -68,6 +68,23 @@ pub struct UpdateRequest {
     pub hue: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saturation: Option<f32>,
+}
+
+impl From<&Preset> for UpdateRequest {
+    fn from(p: &Preset) -> Self {
+        UpdateRequest {
+            on: Some(u8::from(p.on)),
+            brightness: Some(p.brightness),
+            kelvin: if p.hue.is_some() {
+                None
+            } else {
+                Some(p.kelvin)
+            },
+            mired: None,
+            hue: p.hue,
+            saturation: p.saturation,
+        }
+    }
 }
 
 impl UpdateRequest {

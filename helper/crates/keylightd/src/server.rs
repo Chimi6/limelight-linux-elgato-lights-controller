@@ -7,7 +7,7 @@ use limelight_core::api::{
     decode_path_segment, AddLightRequest, AliasRequest, EnabledRequest, GroupRequest,
     HealthResponse, NameRequest, RefreshRequest, RefreshResponse, UpdateRequest,
 };
-use limelight_core::config::Settings;
+use limelight_core::config::{Preset, Settings};
 use limelight_core::elgato::DeviceSettings;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -351,6 +351,36 @@ fn route(state: &AppState, method: &Method, path: &str, body: &str) -> Resp {
                 json(200, &serde_json::json!({ "deleted": true }))
             } else {
                 error(404, &format!("No group named '{name}'"))
+            }
+        }
+
+        // ---- presets ----
+        (Method::Get, ["v1", "presets"]) => json(200, &state.read(|c| c.presets.clone())),
+        (Method::Post, ["v1", "presets"]) => {
+            let preset: Preset = match parse(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            match state.write(|c| c.save_preset(preset)) {
+                Ok(p) => json(200, &p),
+                Err(msg) => error(400, &msg),
+            }
+        }
+        (Method::Put, ["v1", "presets"]) => {
+            let presets: Vec<Preset> = match parse(body) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            match state.write(|c| c.set_presets(presets).map(|_| c.presets.clone())) {
+                Ok(list) => json(200, &list),
+                Err(msg) => error(400, &msg),
+            }
+        }
+        (Method::Delete, ["v1", "presets", name]) => {
+            if state.write(|c| c.remove_preset(name)) {
+                json(200, &serde_json::json!({ "deleted": true }))
+            } else {
+                error(404, &format!("No preset named '{name}'"))
             }
         }
 

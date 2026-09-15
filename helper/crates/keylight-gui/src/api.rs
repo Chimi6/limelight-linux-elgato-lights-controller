@@ -1,7 +1,7 @@
 //! Thin blocking client for the keylightd localhost API.
 
 use limelight_core::api::{
-    encode_path_segment, Group, HealthResponse, LightRecord, LightStateResponse, Settings,
+    encode_path_segment, Group, HealthResponse, LightRecord, LightStateResponse, Preset, Settings,
     UpdateRequest, UpdateResponse,
 };
 use limelight_core::elgato::DeviceSettings;
@@ -219,6 +219,25 @@ impl ApiClient {
             &format!("/v1/lights/{}/name", encode_path_segment(id)),
             &serde_json::json!({ "name": name }),
         )
+    }
+
+    pub fn get_presets(&self) -> Result<Vec<Preset>, ApiError> {
+        self.get("/v1/presets")
+    }
+
+    /// Insert or replace one preset (matched by name).
+    pub fn save_preset(&self, preset: &Preset) -> Result<Preset, ApiError> {
+        self.post("/v1/presets", preset)
+    }
+
+    /// Replace the whole ordered list (rename / reorder).
+    pub fn set_presets(&self, presets: &[Preset]) -> Result<Vec<Preset>, ApiError> {
+        self.put("/v1/presets", &presets)
+    }
+
+    pub fn delete_preset(&self, name: &str) -> Result<(), ApiError> {
+        self.delete::<serde_json::Value>(&format!("/v1/presets/{}", encode_path_segment(name)))
+            .map(|_| ())
     }
 
     pub fn get_settings(&self) -> Result<Settings, ApiError> {

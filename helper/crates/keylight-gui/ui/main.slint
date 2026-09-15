@@ -11,6 +11,7 @@ export struct LightData {
     is-all: bool,
     reachable: bool,
     color-capable: bool,
+    active-preset: string,
 }
 
 export struct GroupData {
@@ -20,6 +21,7 @@ export struct GroupData {
     power-on: bool,
     reachable: bool,
     member-count: int,
+    active-preset: string,
 }
 
 export struct ManageLightEntry {
@@ -34,6 +36,11 @@ export struct GroupLightPick {
     id: string,
     name: string,
     selected: bool,
+}
+
+export struct PresetRow {
+    name: string,
+    summary: string,
 }
 
 export struct LightSettingsData {
@@ -69,6 +76,17 @@ export global Tokens {
     in-out property <color> green-glow: #A8FF60;
     // Content
     in-out property <brush> content-bg: @linear-gradient(180deg, #344A66 0%, #1C2636 100%);
+}
+
+// ---- Shared UI state ----
+export global DragState {
+    // True while any GelSlider is held.
+    in-out property <bool> slider-active: false;
+    // True while the pointer is over a GelSlider. Page Flickables are made
+    // non-interactive *before* a press lands, so they never record a press
+    // they would otherwise wait to see released.
+    in-out property <bool> slider-hover: false;
+    out property <bool> lock-scroll: slider-active || slider-hover;
 }
 
 // ---- Nav tab button ----
@@ -180,13 +198,19 @@ component GelSlider {
 
     touch := TouchArea {
         enabled: root.enabled;
+        changed has-hover => { DragState.slider-hover = self.has-hover; }
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
+                DragState.slider-active = true;
                 root.value = Math.max(0, Math.min(1, (self.mouse-x - 8px) / Math.max(1px, root.width - 16px)));
                 root.changed(root.value);
             }
             if (event.kind == PointerEventKind.up) {
+                DragState.slider-active = false;
                 root.released(root.value);
+            }
+            if (event.kind == PointerEventKind.cancel) {
+                DragState.slider-active = false;
             }
         }
         moved => {
@@ -363,6 +387,80 @@ component HeaderBar {
     }
 }
 
+// ---- Preset chip (on light/group cards) ----
+component PresetChip {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> is-add: false;
+    callback clicked();
+    width: chip-text.preferred-width + 18px;
+    height: 24px;
+    chip-touch := TouchArea {
+        clicked => { root.clicked(); }
+        Rectangle {
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: root.active
+                ? rgba(76, 175, 99, 0.70)
+                : (chip-touch.has-hover ? rgba(44, 94, 143, 0.45) : rgba(44, 94, 143, 0.25));
+            background: root.active
+                ? @linear-gradient(180deg, #C8F6C8 0%, #7EDC8C 100%)
+                : (chip-touch.has-hover
+                    ? @linear-gradient(180deg, #FFFFFF 0%, #EAF4FF 50%, #D4E6FA 100%)
+                    : @linear-gradient(180deg, #F3F9FF 0%, #E2F0FF 50%, #C9E0F8 100%));
+            clip: true;
+            Rectangle {
+                y: 0px;
+                height: parent.height * 0.45;
+                background: @linear-gradient(180deg, rgba(255, 255, 255, 0.50) 0%, transparent 100%);
+            }
+            chip-text := Text {
+                text: root.label;
+                font-size: 11px;
+                font-weight: 600;
+                color: root.active ? #2E6B3A : (root.is-add ? #6A7A8A : #2C5E8F);
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ---- Small square button (settings rows) ----
+component SmallButton {
+    in property <string> label;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 22px;
+    height: 22px;
+    opacity: root.enabled ? 1.0 : 0.35;
+    sb-touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: (root.danger && sb-touch.has-hover) ? rgba(200, 60, 60, 0.50) : rgba(140, 150, 165, 0.30);
+            background: (root.danger && sb-touch.has-hover)
+                ? @linear-gradient(180deg, #FFE0E0 0%, #F5C0C0 100%)
+                : (sb-touch.has-hover
+                    ? @linear-gradient(180deg, #FFFFFF 0%, #E8ECF0 100%)
+                    : @linear-gradient(180deg, #F0F0F0 0%, #E0E0E0 100%));
+            Text {
+                text: root.label;
+                font-size: 13px;
+                font-weight: 700;
+                color: (root.danger && sb-touch.has-hover) ? #C03030 : #666666;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 // ---- Toggle switch (settings rows) ----
 component ToggleSwitch {
     in property <bool> checked: false;
@@ -413,11 +511,15 @@ component LightCard {
     in-out property <bool> power-on: true;
     in property <bool> reachable: true;
     in property <bool> show-settings: false;
+    in property <[string]> presets;
+    in property <string> active-preset: "";
     callback brightness-changed(float);
     callback warmth-changed(float);
     callback power-toggled();
     callback slider-released();
     callback settings-requested();
+    callback preset-tapped(string);
+    callback save-preset();
 
     Rectangle {
         border-radius: 12px;
@@ -539,6 +641,27 @@ component LightCard {
                 enabled: root.reachable;
                 changed(v) => { root.warmth-changed(v); }
                 released(v) => { root.slider-released(); }
+            }
+
+            // Presets: tap to apply, "+" saves the current values as a new preset.
+            Flickable {
+                height: 24px;
+                viewport-height: 24px;
+                viewport-width: chips.preferred-width;
+                chips := HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    for p in root.presets: PresetChip {
+                        label: p;
+                        active: p == root.active-preset;
+                        clicked => { root.preset-tapped(p); }
+                    }
+                    PresetChip {
+                        label: root.presets.length == 0 ? "+ preset" : "+";
+                        is-add: true;
+                        clicked => { root.save-preset(); }
+                    }
+                }
             }
         }
     }
@@ -814,6 +937,106 @@ component LightSettingsPanel {
                         primary: true;
                         clicked => { root.save(); }
                     }
+                }
+            }
+        }
+    }
+}
+
+// ---- Preset editor (card "+" and Settings add / edit) ----
+export struct PresetEdit {
+    original-name: string,
+    name: string,
+    brightness: float,
+    warmth: float,
+    is-new: bool,
+    // Where the starting values came from ("Left Light"); empty when added from Settings.
+    source: string,
+}
+
+component PresetEditorPanel {
+    in-out property <PresetEdit> data;
+    callback save();
+    callback cancel();
+
+    Rectangle {
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: rgba(44, 94, 143, 0.25);
+        background: @linear-gradient(180deg, #FFFFFF 0%, #EEF4FB 100%);
+        clip: true;
+
+        VerticalBox {
+            padding: 10px;
+            spacing: 8px;
+            Text {
+                text: root.data.is-new
+                    ? (root.data.source == "" ? "New preset" : "New preset from " + root.data.source)
+                    : "Edit preset";
+                font-size: 13px;
+                font-weight: 600;
+                color: #2F3B4A;
+            }
+            Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: rgba(140, 150, 165, 0.40);
+                background: #FFFFFF;
+                clip: true;
+                if editor-name.text == "": Text {
+                    text: "Preset name";
+                    x: 6px;
+                    font-size: 13px;
+                    color: #A0AAB4;
+                    vertical-alignment: center;
+                    height: parent.height;
+                }
+                editor-name := TextInput {
+                    text: root.data.name;
+                    font-size: 13px;
+                    color: #2F3B4A;
+                    vertical-alignment: center;
+                    x: 6px;
+                    width: parent.width - 12px;
+                    edited => { root.data.name = self.text; }
+                    accepted => { root.save(); }
+                }
+            }
+            HorizontalBox {
+                padding: 0px;
+                spacing: 8px;
+                Text { text: "Brightness"; font-size: 12px; color: #5A6878; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: Math.round(root.data.brightness * 100) + "%"; font-size: 12px; font-weight: 600; color: #2F3B4A; vertical-alignment: center; }
+            }
+            GelSlider {
+                value: root.data.brightness;
+                is-warmth: false;
+                changed(v) => { root.data.brightness = v; }
+            }
+            HorizontalBox {
+                padding: 0px;
+                spacing: 8px;
+                Text { text: "Temperature"; font-size: 12px; color: #5A6878; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: Math.round(7000 - root.data.warmth * 4100) + "K"; font-size: 12px; font-weight: 600; color: #2F3B4A; vertical-alignment: center; }
+            }
+            GelSlider {
+                value: root.data.warmth;
+                is-warmth: true;
+                changed(v) => { root.data.warmth = v; }
+            }
+            HorizontalBox {
+                padding: 0px;
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                PillButton {
+                    label: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                PillButton {
+                    label: "Save";
+                    primary: true;
+                    clicked => { root.save(); }
                 }
             }
         }
@@ -1353,6 +1576,22 @@ export component MainWindow inherits Window {
     // Fired from the updater thread when results are waiting to be applied.
     callback update-results-ready();
 
+    // Presets
+    in-out property <[string]> presets-model;
+    in-out property <[PresetRow]> presets-manage-model;
+    callback light-preset-tapped(int, string);
+    callback group-preset-tapped(int, string);
+    callback light-save-preset(int);
+    callback group-save-preset(int);
+    callback preset-rename(int, string);
+    callback preset-delete(int);
+    callback preset-move(int, int);
+    in-out property <bool> preset-editor-open: false;
+    in-out property <PresetEdit> preset-editor;
+    callback preset-editor-add();
+    callback preset-editor-edit(int);
+    callback preset-editor-save();
+
     reset-drag-state => {
         root.header-reset-key = 1 - root.header-reset-key;
     }
@@ -1538,6 +1777,7 @@ export component MainWindow inherits Window {
 
                     // Tab 0: Lights
                     if root.selected-tab == 0: Flickable {
+                        interactive: !DragState.lock-scroll;
                         VerticalBox {
                             padding-left: 14px;
                             padding-right: 14px;
@@ -1569,6 +1809,12 @@ export component MainWindow inherits Window {
                                 identify => { root.light-settings-identify(); }
                             }
 
+                            if root.preset-editor-open: PresetEditorPanel {
+                                data <=> root.preset-editor;
+                                save => { root.preset-editor-save(); }
+                                cancel => { root.preset-editor-open = false; }
+                            }
+
                             for light[idx] in root.lights-model: LightCard {
                                 name: light.name;
                                 brightness: light.brightness;
@@ -1576,17 +1822,22 @@ export component MainWindow inherits Window {
                                 power-on: light.power-on;
                                 reachable: light.reachable;
                                 show-settings: !light.is-all && light.reachable;
+                                presets: root.presets-model;
+                                active-preset: light.active-preset;
                                 brightness-changed(v) => { root.light-brightness-changed(idx, v); }
                                 warmth-changed(v) => { root.light-warmth-changed(idx, v); }
                                 power-toggled() => { root.light-power-toggled(idx); }
                                 slider-released() => { root.light-slider-released(idx); }
                                 settings-requested() => { root.light-settings-requested(idx); }
+                                preset-tapped(name) => { root.light-preset-tapped(idx, name); }
+                                save-preset() => { root.light-save-preset(idx); }
                             }
                         }
                     }
 
                     // Tab 1: Groups
                     if root.selected-tab == 1: Flickable {
+                        interactive: !DragState.lock-scroll;
                         VerticalBox {
                             padding-left: 14px;
                             padding-right: 14px;
@@ -1607,22 +1858,33 @@ export component MainWindow inherits Window {
                                 toggle-light(idx) => { root.group-pick-toggled(idx); }
                             }
 
+                            if root.preset-editor-open: PresetEditorPanel {
+                                data <=> root.preset-editor;
+                                save => { root.preset-editor-save(); }
+                                cancel => { root.preset-editor-open = false; }
+                            }
+
                             for group[idx] in root.groups-model: LightCard {
                                 name: group.name;
                                 brightness: group.brightness;
                                 warmth: group.warmth;
                                 power-on: group.power-on;
                                 reachable: group.reachable;
+                                presets: root.presets-model;
+                                active-preset: group.active-preset;
                                 brightness-changed(v) => { root.group-brightness-changed(idx, v); }
                                 warmth-changed(v) => { root.group-warmth-changed(idx, v); }
                                 power-toggled() => { root.group-power-toggled(idx); }
                                 slider-released() => { root.group-slider-released(idx); }
+                                preset-tapped(name) => { root.group-preset-tapped(idx, name); }
+                                save-preset() => { root.group-save-preset(idx); }
                             }
                         }
                     }
 
                     // Tab 2: Settings
                     if root.selected-tab == 2: Flickable {
+                        interactive: !DragState.lock-scroll;
                         VerticalBox {
                             padding-left: 14px;
                             padding-right: 14px;
@@ -1710,6 +1972,83 @@ export component MainWindow inherits Window {
                                         ToggleSwitch {
                                             checked: root.auto-enable-discovered;
                                             toggled(v) => { root.auto-enable-toggled(v); }
+                                        }
+                                    }
+
+                                    Rectangle { height: 1px; background: rgba(0, 0, 0, 0.08); }
+
+                                    // Presets management
+                                    Text {
+                                        text: "Presets";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #2F3B4A;
+                                    }
+                                    Text {
+                                        text: "Tap a preset chip on any light or group to apply it. Save new ones with the + chip on a card, or add one here.";
+                                        font-size: 11px;
+                                        color: #6A7A8A;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.preset-editor-open: PresetEditorPanel {
+                                        data <=> root.preset-editor;
+                                        save => { root.preset-editor-save(); }
+                                        cancel => { root.preset-editor-open = false; }
+                                    }
+                                    for row[idx] in root.presets-manage-model: HorizontalBox {
+                                        padding: 0px;
+                                        spacing: 6px;
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            clip: true;
+                                            VerticalLayout {
+                                                spacing: 0px;
+                                                TextInput {
+                                                    text: row.name;
+                                                    font-size: 13px;
+                                                    font-weight: 600;
+                                                    color: #2F3B4A;
+                                                    accepted => { root.preset-rename(idx, self.text); }
+                                                }
+                                                Text {
+                                                    text: row.summary;
+                                                    font-size: 11px;
+                                                    color: #6A7A8A;
+                                                }
+                                            }
+                                        }
+                                        SmallButton {
+                                            label: "✎";
+                                            clicked => { root.preset-editor-edit(idx); }
+                                        }
+                                        SmallButton {
+                                            label: "▲";
+                                            enabled: idx > 0;
+                                            clicked => { root.preset-move(idx, -1); }
+                                        }
+                                        SmallButton {
+                                            label: "▼";
+                                            enabled: idx < root.presets-manage-model.length - 1;
+                                            clicked => { root.preset-move(idx, 1); }
+                                        }
+                                        SmallButton {
+                                            label: "×";
+                                            danger: true;
+                                            clicked => { root.preset-delete(idx); }
+                                        }
+                                    }
+                                    if root.presets-manage-model.length == 0: Text {
+                                        text: "No presets yet.";
+                                        font-size: 12px;
+                                        color: #8899AA;
+                                    }
+                                    HorizontalBox {
+                                        padding: 0px;
+                                        Rectangle { horizontal-stretch: 1; }
+                                        PillButton {
+                                            label: "Add preset";
+                                            width: 100px;
+                                            clicked => { root.preset-editor-add(); }
                                         }
                                     }
 
