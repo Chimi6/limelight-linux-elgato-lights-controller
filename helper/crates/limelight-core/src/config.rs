@@ -50,7 +50,60 @@ pub struct Config {
     #[serde(default)]
     pub groups: Vec<Group>,
     #[serde(default)]
+    pub presets: Vec<Preset>,
+    #[serde(default)]
     pub settings: Settings,
+}
+
+/// A named look that can be applied to any light, group or all lights.
+/// Target-independent on purpose: "Night" means the same everywhere.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Preset {
+    pub name: String,
+    /// Applying a preset always turns the target on (kept as a field for future "off" presets).
+    #[serde(default = "default_true")]
+    pub on: bool,
+    pub brightness: u8,
+    pub kelvin: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hue: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saturation: Option<f32>,
+}
+
+/// Tolerances used to decide whether a light is "on" a preset.
+pub const PRESET_MATCH_BRIGHTNESS: u8 = 3;
+pub const PRESET_MATCH_KELVIN: u16 = 150;
+
+impl Preset {
+    pub fn normalized(mut self) -> Self {
+        self.name = self.name.trim().to_string();
+        self.brightness = self.brightness.min(100);
+        self.kelvin = self
+            .kelvin
+            .clamp(crate::convert::KELVIN_MIN, crate::convert::KELVIN_MAX);
+        self.hue = self.hue.map(|h| h.clamp(0.0, 360.0));
+        self.saturation = self.saturation.map(|s| s.clamp(0.0, 100.0));
+        self
+    }
+
+    /// True when a light showing `on/brightness/kelvin` is close enough to this preset.
+    pub fn matches(&self, on: bool, brightness: u8, kelvin: u16) -> bool {
+        on == self.on
+            && brightness.abs_diff(self.brightness) <= PRESET_MATCH_BRIGHTNESS
+            && kelvin.abs_diff(self.kelvin) <= PRESET_MATCH_KELVIN
+    }
+
+    pub fn summary(&self) -> String {
+        match (self.hue, self.saturation) {
+            (Some(h), Some(s)) => format!("{}% · hue {:.0}° · sat {:.0}%", self.brightness, h, s),
+            _ => format!("{}% · {}K", self.brightness, self.kelvin),
+        }
+    }
+}
+
+fn preset_key(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 /// One known light. `id` is stable across renames and IP changes:
@@ -226,6 +279,55 @@ impl Config {
         let before = self.groups.len();
         self.groups.retain(|g| g.name != name);
         self.groups.len() != before
+    }
+
+    pub fn find_preset(&self, name: &str) -> Option<&Preset> {
+        let key = preset_key(name);
+        self.presets.iter().find(|p| preset_key(&p.name) == key)
+    }
+
+    /// Insert or replace a preset (matched by case-insensitive name). Keeps position on replace.
+    pub fn save_preset(&mut self, preset: Preset) -> Result<Preset, String> {
+        let preset = preset.normalized();
+        if preset.name.is_empty() {
+            return Err("Preset name must not be empty".into());
+        }
+        if preset.name.len() > 40 {
+            return Err("Preset name is too long (40 characters max)".into());
+        }
+        let key = preset_key(&preset.name);
+        match self.presets.iter_mut().find(|p| preset_key(&p.name) == key) {
+            Some(existing) => *existing = preset.clone(),
+            None => self.presets.push(preset.clone()),
+        }
+        Ok(preset)
+    }
+
+    /// Replace the whole ordered list (rename / reorder / edit in one call).
+    pub fn set_presets(&mut self, presets: Vec<Preset>) -> Result<(), String> {
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::with_capacity(presets.len());
+        for p in presets {
+            let p = p.normalized();
+            if p.name.is_empty() {
+                return Err("Preset name must not be empty".into());
+            }
+            let key = preset_key(&p.name);
+            if seen.contains(&key) {
+                return Err(format!("Duplicate preset name '{}'", p.name));
+            }
+            seen.push(key);
+            out.push(p);
+        }
+        self.presets = out;
+        Ok(())
+    }
+
+    pub fn remove_preset(&mut self, name: &str) -> bool {
+        let key = preset_key(name);
+        let before = self.presets.len();
+        self.presets.retain(|p| preset_key(&p.name) != key);
+        self.presets.len() != before
     }
 }
 

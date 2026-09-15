@@ -10,7 +10,9 @@ mod update_queue;
 use api::ApiClient;
 use fetch::Fetcher;
 use i_slint_backend_winit::{EventResult, WinitWindowAccessor};
-use limelight_core::api::{Group, LightRecord, LightStateResponse, Settings, UpdateRequest};
+use limelight_core::api::{
+    Group, LightRecord, LightStateResponse, Preset, Settings, UpdateRequest,
+};
 use limelight_core::convert::{
     brightness_to_slider, kelvin_to_warmth, slider_to_brightness, warmth_to_kelvin,
 };
@@ -38,6 +40,7 @@ struct Ctx {
     cmd_tx: mpsc::Sender<UpdateCommand>,
     states: RefCell<Vec<LightStateResponse>>,
     groups: RefCell<Vec<Group>>,
+    presets: RefCell<Vec<Preset>>,
     dragging: Cell<bool>,
     last_user_change: Cell<Instant>,
     last_snapshot_request: Cell<Instant>,
@@ -68,9 +71,10 @@ impl Ctx {
             |api| {
                 let states = api.get_states();
                 let groups = api.get_groups();
-                (states, groups)
+                let presets = api.get_presets();
+                (states, groups, presets)
             },
-            move |(states, groups)| {
+            move |(states, groups, presets)| {
                 let online = states.is_ok();
                 if let Some(ui) = ctx.ui() {
                     ui.set_daemon_online(online);
@@ -80,6 +84,9 @@ impl Ctx {
                 }
                 if let Ok(groups) = groups {
                     *ctx.groups.borrow_mut() = groups;
+                }
+                if let Ok(presets) = presets {
+                    *ctx.presets.borrow_mut() = presets;
                 }
                 ctx.sync_models();
             },
@@ -101,11 +108,47 @@ impl Ctx {
         let Some(ui) = self.ui() else { return };
         let states = self.states.borrow();
         let groups = self.groups.borrow();
+        let presets = self.presets.borrow();
+
+        // ---- presets (chip labels + settings rows) ----
+        let names: Vec<SharedString> = presets
+            .iter()
+            .map(|p| SharedString::from(p.name.as_str()))
+            .collect();
+        let current = ui.get_presets_model();
+        let same = current.row_count() == names.len()
+            && names
+                .iter()
+                .enumerate()
+                .all(|(i, n)| current.row_data(i).as_ref() == Some(n));
+        if !same {
+            ui.set_presets_model(ModelRc::from(Rc::new(VecModel::from(names))));
+            let rows: Vec<PresetRow> = presets
+                .iter()
+                .map(|p| PresetRow {
+                    name: SharedString::from(p.name.as_str()),
+                    summary: SharedString::from(p.summary()),
+                })
+                .collect();
+            ui.set_presets_manage_model(ModelRc::from(Rc::new(VecModel::from(rows))));
+        } else {
+            // Names unchanged; summaries may have changed (re-saved preset).
+            let rows = ui.get_presets_manage_model();
+            for (i, p) in presets.iter().enumerate() {
+                if let Some(mut r) = rows.row_data(i) {
+                    let summary = SharedString::from(p.summary());
+                    if r.summary != summary {
+                        r.summary = summary;
+                        rows.set_row_data(i, r);
+                    }
+                }
+            }
+        }
 
         // ---- lights ----
-        let mut entries = vec![all_card(&states)];
+        let mut entries = vec![all_card(&states, &presets)];
         for s in states.iter() {
-            entries.push(light_card(s));
+            entries.push(light_card(s, &presets));
         }
         let model = ui.get_lights_model();
         let same_shape = model.row_count() == entries.len()
@@ -124,7 +167,10 @@ impl Ctx {
         }
 
         // ---- groups ----
-        let entries: Vec<GroupData> = groups.iter().map(|g| group_card(g, &states)).collect();
+        let entries: Vec<GroupData> = groups
+            .iter()
+            .map(|g| group_card(g, &states, &presets))
+            .collect();
         let model = ui.get_groups_model();
         let same_shape = model.row_count() == entries.len()
             && entries
@@ -203,7 +249,16 @@ impl Ctx {
 // Model builders
 // ---------------------------------------------------------------------------
 
-fn light_card(s: &LightStateResponse) -> LightData {
+/// Name of the preset the given values sit on, if any.
+fn active_preset(presets: &[Preset], on: bool, brightness: u8, kelvin: u16) -> SharedString {
+    presets
+        .iter()
+        .find(|p| p.matches(on, brightness, kelvin))
+        .map(|p| SharedString::from(p.name.as_str()))
+        .unwrap_or_default()
+}
+
+fn light_card(s: &LightStateResponse, presets: &[Preset]) -> LightData {
     LightData {
         id: SharedString::from(s.id.as_str()),
         name: SharedString::from(s.display_name()),
@@ -213,6 +268,11 @@ fn light_card(s: &LightStateResponse) -> LightData {
         is_all: false,
         reachable: s.reachable,
         color_capable: s.color_capable,
+        active_preset: if s.reachable {
+            active_preset(presets, s.on, s.brightness, s.kelvin)
+        } else {
+            SharedString::default()
+        },
     }
 }
 
@@ -237,7 +297,7 @@ fn aggregate(states: &[&LightStateResponse]) -> (f32, f32, bool, bool) {
     (b, w, any_on, true)
 }
 
-fn all_card(states: &[LightStateResponse]) -> LightData {
+fn all_card(states: &[LightStateResponse], presets: &[Preset]) -> LightData {
     let refs: Vec<&LightStateResponse> = states.iter().collect();
     let (b, w, on, reachable) = aggregate(&refs);
     LightData {
@@ -249,10 +309,15 @@ fn all_card(states: &[LightStateResponse]) -> LightData {
         is_all: true,
         reachable: reachable || states.is_empty(),
         color_capable: false,
+        active_preset: if reachable {
+            active_preset(presets, on, slider_to_brightness(b), warmth_to_kelvin(w))
+        } else {
+            SharedString::default()
+        },
     }
 }
 
-fn group_card(g: &Group, states: &[LightStateResponse]) -> GroupData {
+fn group_card(g: &Group, states: &[LightStateResponse], presets: &[Preset]) -> GroupData {
     let members: Vec<&LightStateResponse> = states
         .iter()
         .filter(|s| g.members.contains(&s.id))
@@ -265,6 +330,11 @@ fn group_card(g: &Group, states: &[LightStateResponse]) -> GroupData {
         power_on: on,
         reachable,
         member_count: members.len() as i32,
+        active_preset: if reachable {
+            active_preset(presets, on, slider_to_brightness(b), warmth_to_kelvin(w))
+        } else {
+            SharedString::default()
+        },
     }
 }
 
@@ -311,7 +381,12 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_autostart_enabled(autostart::enabled());
 
     // Empty models so the window paints immediately.
-    ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(vec![all_card(&[])]))));
+    ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(vec![all_card(
+        &[],
+        &[],
+    )]))));
+    ui.set_presets_model(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
+    ui.set_presets_manage_model(ModelRc::from(Rc::new(VecModel::<PresetRow>::default())));
     ui.set_groups_model(ModelRc::from(Rc::new(VecModel::<GroupData>::default())));
 
     let api = ApiClient::new();
@@ -335,6 +410,7 @@ fn main() -> Result<(), slint::PlatformError> {
         cmd_tx,
         states: RefCell::new(Vec::new()),
         groups: RefCell::new(Vec::new()),
+        presets: RefCell::new(Vec::new()),
         dragging: Cell::new(false),
         last_user_change: Cell::new(Instant::now() - Duration::from_secs(10)),
         last_snapshot_request: Cell::new(Instant::now() - Duration::from_secs(10)),
@@ -963,6 +1039,301 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // ---- Presets ----
+    ui.on_light_preset_tapped({
+        let ctx = Rc::clone(&ctx);
+        move |idx, name| {
+            let Some(ui) = ctx.ui() else { return };
+            let Some(preset) = ctx
+                .presets
+                .borrow()
+                .iter()
+                .find(|p| p.name == name.as_str())
+                .cloned()
+            else {
+                return;
+            };
+            let model = ui.get_lights_model();
+            let idx = idx as usize;
+            let Some(mut data) = model.row_data(idx) else {
+                return;
+            };
+            let (b, w) = (
+                brightness_to_slider(preset.brightness),
+                kelvin_to_warmth(preset.kelvin),
+            );
+            data.brightness = b;
+            data.warmth = w;
+            data.power_on = preset.on;
+            data.active_preset = name.clone();
+            model.set_row_data(idx, data.clone());
+            if data.is_all {
+                for i in 1..model.row_count() {
+                    if let Some(mut d) = model.row_data(i) {
+                        d.brightness = b;
+                        d.warmth = w;
+                        d.power_on = preset.on;
+                        d.active_preset = name.clone();
+                        model.set_row_data(i, d);
+                    }
+                }
+            } else {
+                refresh_all_card(&model);
+            }
+            {
+                let mut states = ctx.states.borrow_mut();
+                for s in states.iter_mut() {
+                    if data.is_all || s.id == data.id.as_str() {
+                        s.on = preset.on;
+                        s.brightness = preset.brightness;
+                        s.kelvin = preset.kelvin;
+                    }
+                }
+            }
+            ctx.send(target_for(&data), UpdateRequest::from(&preset));
+        }
+    });
+
+    ui.on_group_preset_tapped({
+        let ctx = Rc::clone(&ctx);
+        move |idx, name| {
+            let Some(ui) = ctx.ui() else { return };
+            let Some(preset) = ctx
+                .presets
+                .borrow()
+                .iter()
+                .find(|p| p.name == name.as_str())
+                .cloned()
+            else {
+                return;
+            };
+            let model = ui.get_groups_model();
+            let idx = idx as usize;
+            let Some(mut data) = model.row_data(idx) else {
+                return;
+            };
+            data.brightness = brightness_to_slider(preset.brightness);
+            data.warmth = kelvin_to_warmth(preset.kelvin);
+            data.power_on = preset.on;
+            data.active_preset = name.clone();
+            model.set_row_data(idx, data.clone());
+            let group_name = data.name.to_string();
+            {
+                let groups = ctx.groups.borrow();
+                let mut states = ctx.states.borrow_mut();
+                if let Some(g) = groups.iter().find(|g| g.name == group_name) {
+                    for s in states.iter_mut() {
+                        if g.members.contains(&s.id) {
+                            s.on = preset.on;
+                            s.brightness = preset.brightness;
+                            s.kelvin = preset.kelvin;
+                        }
+                    }
+                }
+            }
+            ctx.send(
+                UpdateTarget::Group(group_name),
+                UpdateRequest::from(&preset),
+            );
+        }
+    });
+
+    // "+" chip: open the editor prefilled with the card's current values.
+    let open_editor_from = {
+        let ui_weak = ui.as_weak();
+        move |source: String, brightness: f32, warmth: f32| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ui.set_preset_editor(PresetEdit {
+                original_name: SharedString::default(),
+                name: SharedString::default(),
+                brightness,
+                warmth,
+                is_new: true,
+                source: SharedString::from(source),
+            });
+            ui.set_preset_editor_open(true);
+        }
+    };
+
+    ui.on_light_save_preset({
+        let ui_weak = ui.as_weak();
+        let open_editor_from = open_editor_from.clone();
+        move |idx| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(data) = ui.get_lights_model().row_data(idx as usize) else {
+                return;
+            };
+            open_editor_from(data.name.to_string(), data.brightness, data.warmth);
+        }
+    });
+
+    ui.on_group_save_preset({
+        let ui_weak = ui.as_weak();
+        let open_editor_from = open_editor_from.clone();
+        move |idx| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let Some(data) = ui.get_groups_model().row_data(idx as usize) else {
+                return;
+            };
+            open_editor_from(data.name.to_string(), data.brightness, data.warmth);
+        }
+    });
+
+    // Settings: rename / reorder / delete presets (whole-list replace keeps order).
+    let push_presets = {
+        let ctx = Rc::clone(&ctx);
+        move |presets: Vec<Preset>| {
+            *ctx.presets.borrow_mut() = presets.clone();
+            ctx.sync_models();
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                move |api| api.set_presets(&presets).map(|_| ()),
+                move |res| {
+                    if let Err(e) = res {
+                        eprintln!("set_presets failed: {e}");
+                    }
+                    ctx2.force_snapshot();
+                },
+            );
+        }
+    };
+
+    ui.on_preset_rename({
+        let ctx = Rc::clone(&ctx);
+        let push_presets = push_presets.clone();
+        move |idx, new_name| {
+            let new_name = new_name.trim().to_string();
+            let mut presets = ctx.presets.borrow().clone();
+            let idx = idx as usize;
+            if new_name.is_empty() || idx >= presets.len() || presets[idx].name == new_name {
+                return;
+            }
+            presets[idx].name = new_name;
+            push_presets(presets);
+        }
+    });
+
+    ui.on_preset_move({
+        let ctx = Rc::clone(&ctx);
+        let push_presets = push_presets.clone();
+        move |idx, dir| {
+            let mut presets = ctx.presets.borrow().clone();
+            let idx = idx as usize;
+            let Some(to) = idx.checked_add_signed(dir as isize) else {
+                return;
+            };
+            if idx >= presets.len() || to >= presets.len() {
+                return;
+            }
+            presets.swap(idx, to);
+            push_presets(presets);
+        }
+    });
+
+    ui.on_preset_delete({
+        let ctx = Rc::clone(&ctx);
+        move |idx| {
+            let name = {
+                let presets = ctx.presets.borrow();
+                let Some(p) = presets.get(idx as usize) else {
+                    return;
+                };
+                p.name.clone()
+            };
+            ctx.presets.borrow_mut().retain(|p| p.name != name);
+            ctx.sync_models();
+            let ctx2 = Rc::clone(&ctx);
+            ctx.fetcher.run(
+                move |api| api.delete_preset(&name),
+                move |res| {
+                    if let Err(e) = res {
+                        eprintln!("delete_preset failed: {e}");
+                    }
+                    ctx2.force_snapshot();
+                },
+            );
+        }
+    });
+
+    // Settings: add / edit presets through the editor panel.
+    ui.on_preset_editor_add({
+        let ui_weak = ui.as_weak();
+        move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ui.set_preset_editor(PresetEdit {
+                original_name: SharedString::default(),
+                name: SharedString::default(),
+                brightness: 0.5,
+                warmth: kelvin_to_warmth(4500),
+                is_new: true,
+                source: SharedString::default(),
+            });
+            ui.set_preset_editor_open(true);
+        }
+    });
+
+    ui.on_preset_editor_edit({
+        let ctx = Rc::clone(&ctx);
+        move |idx| {
+            let Some(ui) = ctx.ui() else { return };
+            let Some(p) = ctx.presets.borrow().get(idx as usize).cloned() else {
+                return;
+            };
+            ui.set_preset_editor(PresetEdit {
+                original_name: SharedString::from(p.name.as_str()),
+                name: SharedString::from(p.name.as_str()),
+                brightness: brightness_to_slider(p.brightness),
+                warmth: kelvin_to_warmth(p.kelvin),
+                is_new: false,
+                source: SharedString::default(),
+            });
+            ui.set_preset_editor_open(true);
+        }
+    });
+
+    ui.on_preset_editor_save({
+        let ctx = Rc::clone(&ctx);
+        let push_presets = push_presets.clone();
+        move || {
+            let Some(ui) = ctx.ui() else { return };
+            let edit = ui.get_preset_editor();
+            let name = edit.name.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let values = Preset {
+                name: name.clone(),
+                on: true,
+                brightness: slider_to_brightness(edit.brightness),
+                kelvin: warmth_to_kelvin(edit.warmth),
+                hue: None,
+                saturation: None,
+            };
+            ui.set_preset_editor_open(false);
+            let original = edit.original_name.to_string();
+            if !edit.is_new && !original.is_empty() {
+                // Edit in place (handles rename) by replacing the ordered list.
+                let mut presets = ctx.presets.borrow().clone();
+                match presets.iter_mut().find(|p| p.name == original) {
+                    Some(p) => *p = values,
+                    None => presets.push(values),
+                }
+                push_presets(presets);
+            } else {
+                let ctx2 = Rc::clone(&ctx);
+                ctx.fetcher.run(
+                    move |api| api.save_preset(&values).map(|_| ()),
+                    move |res| {
+                        if let Err(e) = res {
+                            eprintln!("save_preset failed: {e}");
+                        }
+                        ctx2.force_snapshot();
+                    },
+                );
+            }
+        }
+    });
+
     // ---- Per-light settings panel ----
     ui.on_light_settings_requested({
         let ctx = Rc::clone(&ctx);
@@ -1127,6 +1498,58 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
+    // Dev aid: LIMELIGHT_WINDOW_HEIGHT=<px> (screenshots of long tabs).
+    if let Some(h) = std::env::var("LIMELIGHT_WINDOW_HEIGHT")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        ui.window().set_size(slint::LogicalSize::new(400.0, h));
+    }
+    // Dev aid: LIMELIGHT_OPEN_SAVE_PRESET=1 opens the save-preset panel for the first light.
+    let dev_save_timer = slint::Timer::default();
+    if std::env::var("LIMELIGHT_OPEN_SAVE_PRESET").is_ok() {
+        let ui_weak = ui.as_weak();
+        dev_save_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(2500),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    if ui.get_lights_model().row_count() > 1 {
+                        ui.invoke_light_save_preset(1);
+                    }
+                }
+            },
+        );
+    }
+
+    // Dev aid: LIMELIGHT_OPEN_PRESET_EDITOR=1 opens the Settings preset editor (add mode).
+    let dev_editor_timer = slint::Timer::default();
+    if std::env::var("LIMELIGHT_OPEN_PRESET_EDITOR").is_ok() {
+        let ui_weak = ui.as_weak();
+        dev_editor_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(2500),
+            move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.invoke_preset_editor_add();
+                }
+            },
+        );
+    }
+
+    // Dev aid: LIMELIGHT_OPEN_TAB=0|1|2 selects a tab at start (screenshots).
+    if let Some(tab) = std::env::var("LIMELIGHT_OPEN_TAB")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+    {
+        ui.set_selected_tab(tab);
+        match tab {
+            1 => ui.invoke_nav_groups(),
+            2 => ui.invoke_nav_settings(),
+            _ => ui.invoke_nav_lights(),
+        }
+    }
+
     // ---- Window drag (frameless window) + focus tracking ----
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
     let drag_in_progress = Rc::new(RefCell::new(false));
@@ -1238,6 +1661,7 @@ fn refresh_all_card(model: &ModelRc<LightData>) {
             all.power_on = any_on;
             all.brightness = b;
             all.warmth = w;
+            all.active_preset = SharedString::default();
             model.set_row_data(0, all);
         }
     }

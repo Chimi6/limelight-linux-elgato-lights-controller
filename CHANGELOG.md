@@ -4,6 +4,9 @@ All notable changes to LimeLight. Format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Added
+- Presets: save a light's current look with the + chip, apply it from any light, group or All Lights card with one tap; the active preset is highlighted. Manage (rename, reorder, delete) in Settings. Stored by the daemon (`/v1/presets`) so the OpenDeck plugin can share them.
+
 ## [0.2.0] - 2026-09-14
 
 ### Added

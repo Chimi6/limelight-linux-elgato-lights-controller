@@ -136,6 +136,17 @@ Makes the light blink.
 - `POST /v1/groups` — `{ "name": "office", "members": ["<id or alias>", …] }` creates or replaces. Unknown members are rejected.
 - `DELETE /v1/groups/{name}`
 
+### Presets
+
+Named, target-independent looks shared by the window and the OpenDeck plugin.
+
+- `GET /v1/presets` → `[{ "name": "Night", "on": true, "brightness": 15, "kelvin": 3200 }]` (colour lights may add `hue`/`saturation`)
+- `POST /v1/presets` — body is one preset; inserts or replaces by case-insensitive name, keeps position. 400 on empty/too-long name.
+- `PUT /v1/presets` — body is the whole ordered list; use for rename and reorder. 400 on duplicate names.
+- `DELETE /v1/presets/{name}`
+
+Applying a preset is client-side: turn it into an update (`{on:1, brightness, kelvin}` or hue/saturation for colour presets) and send it to `/v1/lights/{id}`, `/v1/groups/{name}` or `/v1/all`. A light "is on" a preset when it is on and within 3 % brightness and 150 K.
+
 ### Settings
 
 - `GET /v1/settings` / `PUT /v1/settings`
