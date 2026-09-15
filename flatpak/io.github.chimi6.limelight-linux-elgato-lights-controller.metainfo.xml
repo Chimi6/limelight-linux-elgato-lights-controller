@@ -11,7 +11,7 @@
     </p>
     <p>
       A small local daemon talks to the lights and exposes a localhost HTTP API so you can build your own
-      integrations (scripts, stream decks, Open Deck).
+      integrations. An OpenDeck (Stream Deck) plugin is available separately.
     </p>
   </description>
   <screenshots>
@@ -36,6 +36,7 @@
   <url type="homepage">https://github.com/Chimi6/limelight-linux-elgato-lights-controller</url>
   <url type="bugtracker">https://github.com/Chimi6/limelight-linux-elgato-lights-controller/issues</url>
   <url type="vcs-browser">https://github.com/Chimi6/limelight-linux-elgato-lights-controller</url>
+  <url type="contribute">https://github.com/Chimi6/limelight-opendeck-plugin</url>
   <launchable type="desktop-id">io.github.chimi6.limelight-linux-elgato-lights-controller.desktop</launchable>
   <categories>
     <category>Utility</category>
