@@ -18,6 +18,7 @@ use limelight_core::convert::{
 };
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -41,9 +42,17 @@ struct Ctx {
     states: RefCell<Vec<LightStateResponse>>,
     groups: RefCell<Vec<Group>>,
     presets: RefCell<Vec<Preset>>,
+    /// "All Lights" slider positions (brightness, warmth). A master control:
+    /// set by the user, initialised from the average once, never overwritten
+    /// by member changes.
+    all_sliders: Cell<Option<(f32, f32)>>,
+    /// Same for each group, keyed by group name.
+    group_sliders: RefCell<HashMap<String, (f32, f32)>>,
     dragging: Cell<bool>,
     last_user_change: Cell<Instant>,
     last_snapshot_request: Cell<Instant>,
+    /// Last time we tried to (re)start the daemon after finding it gone.
+    last_daemon_attempt: Cell<Instant>,
     window_focused: Cell<bool>,
 }
 
@@ -79,6 +88,9 @@ impl Ctx {
                 if let Some(ui) = ctx.ui() {
                     ui.set_daemon_online(online);
                 }
+                if !online {
+                    ctx.supervise_daemon();
+                }
                 if let Ok(states) = states {
                     *ctx.states.borrow_mut() = states;
                 }
@@ -89,6 +101,36 @@ impl Ctx {
                     *ctx.presets.borrow_mut() = presets;
                 }
                 ctx.sync_models();
+            },
+        );
+    }
+
+    /// The daemon is not answering: try to bring it back, at most once per 10 s.
+    /// Marks every card offline meanwhile so the UI never lies about reachability.
+    fn supervise_daemon(self: &Rc<Self>) {
+        if self.last_daemon_attempt.get().elapsed() < Duration::from_secs(10) {
+            return;
+        }
+        self.last_daemon_attempt.set(Instant::now());
+        {
+            let mut states = self.states.borrow_mut();
+            for s in states.iter_mut() {
+                s.reachable = false;
+            }
+        }
+        self.sync_models();
+        if let Some(ui) = self.ui() {
+            ui.set_daemon_status(SharedString::from("Daemon not responding, restarting…"));
+        }
+        let ctx = Rc::clone(self);
+        self.fetcher.run(
+            |_api| daemon::ensure_running(),
+            move |status| {
+                if let Some(ui) = ctx.ui() {
+                    ui.set_daemon_status(SharedString::from(status.text()));
+                    ui.set_daemon_online(!matches!(status, daemon::DaemonStatus::Unavailable(_)));
+                }
+                ctx.force_snapshot();
             },
         );
     }
@@ -146,7 +188,16 @@ impl Ctx {
         }
 
         // ---- lights ----
-        let mut entries = vec![all_card(&states, &presets)];
+        let all_sticky = match self.all_sliders.get() {
+            Some(v) => v,
+            None => {
+                let refs: Vec<&LightStateResponse> = states.iter().collect();
+                let (b, w, _, _) = aggregate(&refs);
+                self.all_sliders.set(Some((b, w)));
+                (b, w)
+            }
+        };
+        let mut entries = vec![all_card(&states, &presets, all_sticky)];
         for s in states.iter() {
             entries.push(light_card(s, &presets));
         }
@@ -167,10 +218,23 @@ impl Ctx {
         }
 
         // ---- groups ----
-        let entries: Vec<GroupData> = groups
-            .iter()
-            .map(|g| group_card(g, &states, &presets))
-            .collect();
+        let entries: Vec<GroupData> = {
+            let mut sticky = self.group_sliders.borrow_mut();
+            groups
+                .iter()
+                .map(|g| {
+                    let members: Vec<&LightStateResponse> = states
+                        .iter()
+                        .filter(|s| g.members.contains(&s.id))
+                        .collect();
+                    let pos = *sticky.entry(g.name.clone()).or_insert_with(|| {
+                        let (b, w, _, _) = aggregate(&members);
+                        (b, w)
+                    });
+                    group_card(g, &members, &presets, pos)
+                })
+                .collect()
+        };
         let model = ui.get_groups_model();
         let same_shape = model.row_count() == entries.len()
             && entries
@@ -239,9 +303,121 @@ impl Ctx {
         }
     }
 
+    /// Mirror a slider drag into the cached states so member-based highlights
+    /// (All Lights, groups) are computed from current values.
+    fn set_states_brightness(&self, data: &LightData, brightness: u8) {
+        let mut states = self.states.borrow_mut();
+        for s in states.iter_mut() {
+            if data.is_all || s.id == data.id.as_str() {
+                s.brightness = brightness;
+            }
+        }
+    }
+
+    fn set_states_kelvin(&self, data: &LightData, kelvin: u16) {
+        let mut states = self.states.borrow_mut();
+        for s in states.iter_mut() {
+            if data.is_all || s.id == data.id.as_str() {
+                s.kelvin = kelvin;
+            }
+        }
+    }
+
+    /// A group control changed: mirror it onto the member cards on the Lights
+    /// tab so individual cards always show their real level.
+    fn update_light_rows_for_group(&self, group: &str, f: impl Fn(&mut LightData)) {
+        let Some(ui) = self.ui() else { return };
+        let member_ids: Vec<String> = self
+            .groups
+            .borrow()
+            .iter()
+            .find(|g| g.name == group)
+            .map(|g| g.members.clone())
+            .unwrap_or_default();
+        let model = ui.get_lights_model();
+        for i in 1..model.row_count() {
+            if let Some(mut d) = model.row_data(i) {
+                if member_ids.iter().any(|m| m == d.id.as_str()) {
+                    f(&mut d);
+                    model.set_row_data(i, d);
+                }
+            }
+        }
+        refresh_all_card(&model);
+    }
+
+    fn set_group_states(&self, group: &str, f: impl Fn(&mut LightStateResponse)) {
+        let groups = self.groups.borrow();
+        let mut states = self.states.borrow_mut();
+        if let Some(g) = groups.iter().find(|g| g.name == group) {
+            for s in states.iter_mut() {
+                if g.members.contains(&s.id) {
+                    f(s);
+                }
+            }
+        }
+    }
+
     fn send(&self, target: UpdateTarget, update: UpdateRequest) {
         self.touched();
         let _ = self.cmd_tx.send(UpdateCommand { target, update });
+        // Every user change goes through here, so this is the one place the
+        // preset highlights are re-derived from the cards' current values.
+        self.recompute_presets();
+    }
+
+    /// Re-derive `active_preset` for every light and group card from the
+    /// values the card currently shows. Highlight rule: reachable, powered
+    /// on, and values within tolerance of the preset. Nothing else.
+    fn recompute_presets(&self) {
+        let Some(ui) = self.ui() else { return };
+        let presets = self.presets.borrow();
+
+        let states = self.states.borrow();
+        let lights = ui.get_lights_model();
+        for i in 0..lights.row_count() {
+            if let Some(mut d) = lights.row_data(i) {
+                let active = if d.is_all {
+                    let refs: Vec<&LightStateResponse> = states.iter().collect();
+                    active_preset_for_members(&presets, &refs)
+                } else if d.reachable {
+                    active_preset(
+                        &presets,
+                        d.power_on,
+                        slider_to_brightness(d.brightness),
+                        warmth_to_kelvin(d.warmth),
+                    )
+                } else {
+                    SharedString::default()
+                };
+                if d.active_preset != active {
+                    d.active_preset = active;
+                    lights.set_row_data(i, d);
+                }
+            }
+        }
+
+        let group_defs = self.groups.borrow();
+        let groups = ui.get_groups_model();
+        for i in 0..groups.row_count() {
+            if let Some(mut g) = groups.row_data(i) {
+                let members: Vec<&LightStateResponse> = group_defs
+                    .iter()
+                    .find(|def| def.name == g.name.as_str())
+                    .map(|def| {
+                        states
+                            .iter()
+                            .filter(|s| def.members.contains(&s.id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let active = active_preset_for_members(&presets, &members);
+                if g.active_preset != active {
+                    g.active_preset = active;
+                    groups.set_row_data(i, g);
+                }
+            }
+        }
     }
 }
 
@@ -297,44 +473,56 @@ fn aggregate(states: &[&LightStateResponse]) -> (f32, f32, bool, bool) {
     (b, w, any_on, true)
 }
 
-fn all_card(states: &[LightStateResponse], presets: &[Preset]) -> LightData {
+/// Preset that *every* reachable member is on (at least one member required).
+fn active_preset_for_members(presets: &[Preset], members: &[&LightStateResponse]) -> SharedString {
+    let reachable: Vec<&&LightStateResponse> = members.iter().filter(|m| m.reachable).collect();
+    if reachable.is_empty() {
+        return SharedString::default();
+    }
+    presets
+        .iter()
+        .find(|p| {
+            reachable
+                .iter()
+                .all(|m| p.matches(m.on, m.brightness, m.kelvin))
+        })
+        .map(|p| SharedString::from(p.name.as_str()))
+        .unwrap_or_default()
+}
+
+/// All Lights card: sliders are the sticky master position; power = any on;
+/// chip = every reachable light on that preset.
+fn all_card(states: &[LightStateResponse], presets: &[Preset], sliders: (f32, f32)) -> LightData {
     let refs: Vec<&LightStateResponse> = states.iter().collect();
-    let (b, w, on, reachable) = aggregate(&refs);
+    let (_, _, on, reachable) = aggregate(&refs);
     LightData {
         id: SharedString::from("__all__"),
         name: SharedString::from("All Lights"),
-        brightness: b,
-        warmth: w,
+        brightness: sliders.0,
+        warmth: sliders.1,
         power_on: on,
         is_all: true,
         reachable: reachable || states.is_empty(),
         color_capable: false,
-        active_preset: if reachable {
-            active_preset(presets, on, slider_to_brightness(b), warmth_to_kelvin(w))
-        } else {
-            SharedString::default()
-        },
+        active_preset: active_preset_for_members(presets, &refs),
     }
 }
 
-fn group_card(g: &Group, states: &[LightStateResponse], presets: &[Preset]) -> GroupData {
-    let members: Vec<&LightStateResponse> = states
-        .iter()
-        .filter(|s| g.members.contains(&s.id))
-        .collect();
-    let (b, w, on, reachable) = aggregate(&members);
+fn group_card(
+    g: &Group,
+    members: &[&LightStateResponse],
+    presets: &[Preset],
+    sliders: (f32, f32),
+) -> GroupData {
+    let (_, _, on, reachable) = aggregate(members);
     GroupData {
         name: SharedString::from(g.name.as_str()),
-        brightness: b,
-        warmth: w,
+        brightness: sliders.0,
+        warmth: sliders.1,
         power_on: on,
         reachable,
         member_count: members.len() as i32,
-        active_preset: if reachable {
-            active_preset(presets, on, slider_to_brightness(b), warmth_to_kelvin(w))
-        } else {
-            SharedString::default()
-        },
+        active_preset: active_preset_for_members(presets, members),
     }
 }
 
@@ -384,6 +572,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_lights_model(ModelRc::from(Rc::new(VecModel::from(vec![all_card(
         &[],
         &[],
+        (0.5, 0.5),
     )]))));
     ui.set_presets_model(ModelRc::from(Rc::new(VecModel::<SharedString>::default())));
     ui.set_presets_manage_model(ModelRc::from(Rc::new(VecModel::<PresetRow>::default())));
@@ -411,9 +600,12 @@ fn main() -> Result<(), slint::PlatformError> {
         states: RefCell::new(Vec::new()),
         groups: RefCell::new(Vec::new()),
         presets: RefCell::new(Vec::new()),
+        all_sliders: Cell::new(None),
+        group_sliders: RefCell::new(HashMap::new()),
         dragging: Cell::new(false),
         last_user_change: Cell::new(Instant::now() - Duration::from_secs(10)),
         last_snapshot_request: Cell::new(Instant::now() - Duration::from_secs(10)),
+        last_daemon_attempt: Cell::new(Instant::now() - Duration::from_secs(60)),
         window_focused: Cell::new(true),
     });
 
@@ -523,6 +715,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 data.brightness = value;
                 model.set_row_data(idx, data.clone());
                 if data.is_all {
+                    ctx.all_sliders.set(Some((value, data.warmth)));
                     for i in 1..model.row_count() {
                         if let Some(mut d) = model.row_data(i) {
                             d.brightness = value;
@@ -532,6 +725,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     refresh_all_card(&model);
                 }
+                ctx.set_states_brightness(&data, slider_to_brightness(value));
                 ctx.send(
                     target_for(&data),
                     UpdateRequest {
@@ -554,6 +748,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 data.warmth = value;
                 model.set_row_data(idx, data.clone());
                 if data.is_all {
+                    ctx.all_sliders.set(Some((data.brightness, value)));
                     for i in 1..model.row_count() {
                         if let Some(mut d) = model.row_data(i) {
                             d.warmth = value;
@@ -563,6 +758,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 } else {
                     refresh_all_card(&model);
                 }
+                ctx.set_states_kelvin(&data, warmth_to_kelvin(value));
                 ctx.send(
                     target_for(&data),
                     UpdateRequest {
@@ -652,6 +848,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(mut data) = model.row_data(idx) {
                 data.brightness = value;
                 model.set_row_data(idx, data.clone());
+                ctx.group_sliders
+                    .borrow_mut()
+                    .insert(data.name.to_string(), (value, data.warmth));
+                ctx.set_group_states(&data.name, |s| s.brightness = slider_to_brightness(value));
+                ctx.update_light_rows_for_group(&data.name, |d| d.brightness = value);
                 ctx.send(
                     UpdateTarget::Group(data.name.to_string()),
                     UpdateRequest {
@@ -673,6 +874,11 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(mut data) = model.row_data(idx) {
                 data.warmth = value;
                 model.set_row_data(idx, data.clone());
+                ctx.group_sliders
+                    .borrow_mut()
+                    .insert(data.name.to_string(), (data.brightness, value));
+                ctx.set_group_states(&data.name, |s| s.kelvin = warmth_to_kelvin(value));
+                ctx.update_light_rows_for_group(&data.name, |d| d.warmth = value);
                 ctx.send(
                     UpdateTarget::Group(data.name.to_string()),
                     UpdateRequest {
@@ -706,6 +912,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                     }
                 }
+                ctx.update_light_rows_for_group(&name, |d| d.power_on = new_power);
                 ctx.send(
                     UpdateTarget::Group(name),
                     UpdateRequest {
@@ -1068,6 +1275,7 @@ fn main() -> Result<(), slint::PlatformError> {
             data.active_preset = name.clone();
             model.set_row_data(idx, data.clone());
             if data.is_all {
+                ctx.all_sliders.set(Some((b, w)));
                 for i in 1..model.row_count() {
                     if let Some(mut d) = model.row_data(i) {
                         d.brightness = b;
@@ -1118,6 +1326,19 @@ fn main() -> Result<(), slint::PlatformError> {
             data.active_preset = name.clone();
             model.set_row_data(idx, data.clone());
             let group_name = data.name.to_string();
+            ctx.group_sliders
+                .borrow_mut()
+                .insert(group_name.clone(), (data.brightness, data.warmth));
+            {
+                let (b, w, on) = (data.brightness, data.warmth, preset.on);
+                let name_for_rows = name.clone();
+                ctx.update_light_rows_for_group(&group_name, |d| {
+                    d.brightness = b;
+                    d.warmth = w;
+                    d.power_on = on;
+                    d.active_preset = name_for_rows.clone();
+                });
+            }
             {
                 let groups = ctx.groups.borrow();
                 let mut states = ctx.states.borrow_mut();
@@ -1639,29 +1860,14 @@ fn target_for(data: &LightData) -> UpdateTarget {
     }
 }
 
-/// Recompute the "All Lights" card from the individual cards (power = any on,
-/// sliders = average of reachable lights).
+/// Keep the "All Lights" power button honest (any light on). Its sliders are
+/// a master control and are deliberately left where the user put them.
 fn refresh_all_card(model: &ModelRc<LightData>) {
-    let rows: Vec<LightData> = (1..model.row_count())
-        .filter_map(|i| model.row_data(i))
-        .collect();
-    let any_on = rows.iter().any(|d| d.power_on);
-    let reachable: Vec<&LightData> = rows.iter().filter(|d| d.reachable).collect();
-    let (b, w) = if reachable.is_empty() {
-        (0.5, 0.5)
-    } else {
-        let n = reachable.len() as f32;
-        (
-            reachable.iter().map(|d| d.brightness).sum::<f32>() / n,
-            reachable.iter().map(|d| d.warmth).sum::<f32>() / n,
-        )
-    };
+    let any_on =
+        (1..model.row_count()).any(|i| model.row_data(i).map(|d| d.power_on).unwrap_or(false));
     if let Some(mut all) = model.row_data(0) {
-        if all.is_all && (all.power_on != any_on || all.brightness != b || all.warmth != w) {
+        if all.is_all && all.power_on != any_on {
             all.power_on = any_on;
-            all.brightness = b;
-            all.warmth = w;
-            all.active_preset = SharedString::default();
             model.set_row_data(0, all);
         }
     }

@@ -71,9 +71,12 @@ pub struct Preset {
     pub saturation: Option<f32>,
 }
 
-/// Tolerances used to decide whether a light is "on" a preset.
-pub const PRESET_MATCH_BRIGHTNESS: u8 = 3;
-pub const PRESET_MATCH_KELVIN: u16 = 150;
+/// Tolerances used to decide whether a light is "on" a preset. Tight on
+/// purpose: any visible change to a slider must clear the highlight. Kelvin
+/// gets a little slack because the device stores mired (4200 K reads back
+/// as 4202 K).
+pub const PRESET_MATCH_BRIGHTNESS: u8 = 1;
+pub const PRESET_MATCH_KELVIN: u16 = 60;
 
 impl Preset {
     pub fn normalized(mut self) -> Self {
